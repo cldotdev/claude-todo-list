@@ -1,0 +1,34 @@
+name: Release
+
+# All three components are anchored so that a prerelease tag such as
+# v0.2.0-rc1 does not ship a release.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # actions/checkout maps the pushed commit straight onto refs/tags,
+      # leaving a lightweight tag that carries no annotation. --notes-from-tag
+      # reads the local tag and falls back to the commit message when the
+      # annotation is missing, so the release notes depend on this fetch.
+      # --title keeps the release named after the tag alone: left unset,
+      # GitHub titles it with the tag and the annotation's first line, which
+      # the notes already open with.
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git fetch --force origin \
+            "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --notes-from-tag --title "$GITHUB_REF_NAME"
