@@ -8,6 +8,8 @@ A [Claude Code](https://code.claude.com) mod that keeps a running list of the op
 
 Long sessions leave decisions, promised follow-ups, and unanswered questions far back in the conversation, where they are easy to drop. The mod collects them as the conversation goes, so they stay in sight until they are settled.
 
+![Demo](assets/demo.gif)
+
 ## How It Works
 
 - After each main-loop turn that ends with an answer, the mod sends the turn to Sonnet (the `sonnet` alias, so the model follows the installed Claude Code version) and asks which current items the turn resolved and which new ones it opened. Subagent turns do not count.
