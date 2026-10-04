@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}, Claude Code ${{ matrix.claude }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # The pinned version is the one the README names; latest catches plugin
+        # API changes before a release reaches users.
+        claude: ["2.1.289", latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@${{ matrix.claude }}"
+
+      - name: Validate
+        run: claude plugin validate --strict .
+
+      - name: Test
+        run: claude plugin test .

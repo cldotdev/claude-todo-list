@@ -1,0 +1,14 @@
+{
+  "name": "claude-todo-list",
+  "owner": { "name": "Chienlung Huang" },
+  "metadata": {
+    "description": "The todo-list mod for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "todo-list",
+      "source": "./",
+      "description": "Keeps a running list of open items from the conversation and shows it above the prompt."
+    }
+  ]
+}
