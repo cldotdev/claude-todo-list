@@ -1,5 +1,7 @@
 # Claude Todo List
 
+[![CI](https://github.com/cldotdev/claude-todo-list/actions/workflows/ci.yml/badge.svg)](https://github.com/cldotdev/claude-todo-list/actions/workflows/ci.yml)
+
 English | [繁體中文](README.zh-TW.md)
 
 A [Claude Code](https://code.claude.com) mod that keeps a running list of the open items in a conversation and shows it in a band above the prompt.
