@@ -70,6 +70,14 @@ claude plugin validate .
 claude plugin test .
 ```
 
+To try local changes, start Claude Code with the clone loaded for that session:
+
+```bash
+claude --plugin-dir /path/to/claude-todo-list
+```
+
+The clone replaces an installed `todo-list@claude-todo-list` for that session, so there is no need to disable or uninstall it first.
+
 ## License
 
 [MIT](LICENSE)

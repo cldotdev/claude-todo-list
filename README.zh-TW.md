@@ -70,6 +70,14 @@ claude plugin validate .
 claude plugin test .
 ```
 
+要試用本機的修改，啟動 Claude Code 時載入 clone，只對這個 session 有效：
+
+```bash
+claude --plugin-dir /path/to/claude-todo-list
+```
+
+在這個 session 裡，clone 會取代已安裝的 `todo-list@claude-todo-list`，不需要先停用或解除安裝。
+
 ## 授權
 
 [MIT](LICENSE)
