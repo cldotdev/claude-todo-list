@@ -21,6 +21,7 @@ function setup(
   const asked: string[] = []
   const filled: string[] = []
   const submitted: string[] = []
+  const landed: (string | undefined)[] = []
   const clock = mock.clock(on)
   mock.store(on, stored)
   on('session.start', () => ({ cwd: '/tmp' }))
@@ -34,7 +35,10 @@ function setup(
   on('ui.render', $ => h($.ui.resolve(BAND).Text, null, 'engine band') as never)
   on('session.id', () => ({ value: 's1' }))
   on('settings.read', () => ({ value: settings }))
-  on('ui.focus', () => ({}))
+  on('ui.focus', (_$, e) => {
+    landed.push(e.element)
+    return {}
+  })
   on('prompt.fill', (_$, e) => {
     filled.push(e.text)
     return { isFilled: true, text: e.text, cursor: e.text.length }
@@ -45,7 +49,7 @@ function setup(
     const reply = replies.shift() ?? { isAnswered: false, reason: 'empty-reply' }
     return { value: { usage: USAGE, ...reply } as never }
   })
-  return { asked, clock, filled, submitted }
+  return { asked, clock, filled, landed, submitted }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -108,15 +112,17 @@ test('a failed or unparseable completion keeps the previous list', async ($, on)
   expect(buttons).toBe(4)
 })
 
-// Puts the band's focus ring on one row, as Tab would.
-const focusRow = ($: Engine, row: number) =>
+// Moves the band's focus ring onto one of its Buttons, as Tab would.
+const focusOn = ($: Engine, element: string) =>
   $.ui.focus({
     component: 'AbovePrompt',
     requestId: 'band',
     plugin: 'todo-list',
-    element: `item-${row}`,
+    element,
     origin: { kind: 'person' },
   })
+
+const focusRow = ($: Engine, row: number) => focusOn($, `item-${row}`)
 
 const origin = { kind: 'plugin', name: 'test' } as never
 const presentation = { isFullscreen: false, columns: 80 } as never
@@ -132,6 +138,21 @@ test('the quote key quotes the focused item into the prompt', async ($, on) => {
   await ui.unmount()
   expect(filled).toEqual(['> b\n> d-b\n\n'])
   expect((await shown($)).buttons).toBe(5)
+})
+
+test('the focus ring skips the hidden hotkey Buttons and wraps around the rows', async ($, on) => {
+  const { clock, landed } = setup(on, [
+    { isAnswered: true, text: '{"remove":[],"add":[{"title":"a","detail":""},{"title":"b","detail":""},{"title":"c","detail":""}]}' },
+  ])
+  await start($)
+  await turn($, clock, {})
+
+  const ui = await $.ui.mount({ ...BAND, requestId: 'band' })
+  await focusRow($, 2)
+  await focusOn($, 'details')
+  await focusOn($, 'quote-all')
+  await ui.unmount()
+  expect(landed).toEqual(['item-2', 'item-0', 'item-2'])
 })
 
 test('/todos delete removes an item, records it and keeps it from coming back', async ($, on) => {

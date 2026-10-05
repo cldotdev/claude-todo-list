@@ -407,11 +407,20 @@ export const register: Register = on => {
       }
       return next(e)
     }
-    if (e.plugin !== 'todo-list' || !e.element.startsWith(ROW_PREFIX)) {
+    if (e.plugin !== 'todo-list') {
       return next(e)
     }
-    const [list, shownTitle] = await Promise.all([read($, items), read($, detailed)])
-    const item = list[Number(e.element.slice(ROW_PREFIX.length))]
+    const [list, current, shownTitle] = await Promise.all([read($, items), read($, focused), read($, detailed)])
+    const last = list.length - 1
+    let index = Number(e.element.slice(ROW_PREFIX.length))
+    // The hidden hotkey Buttons are ring stops too. The event carries no
+    // direction, so the handler infers it from the row the ring leaves: Tab
+    // off the last row wraps to the first, and Shift+Tab off the first to the
+    // last.
+    if (!e.element.startsWith(ROW_PREFIX)) {
+      index = list[last]?.title === current ? 0 : last
+    }
+    const item = list[index]
     if (item === undefined) {
       return next(e)
     }
@@ -421,7 +430,7 @@ export const register: Register = on => {
       await update($, detailed, () => item.title)
     }
 
-    return next(e)
+    return next({ ...e, element: `${ROW_PREFIX}${index}` })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
