@@ -170,7 +170,7 @@ test('/todos delete removes an item, records it and keeps it from coming back', 
   expect((await shown($)).buttons).toBe(4)
 
   await turn($, clock, {})
-  expect(asked[1]).toContain('Items the user already ticked off')
+  expect(asked[1]).toContain('Items the user removed')
   expect(asked[1]).toContain('["a"]')
   expect((await shown($)).buttons).toBe(4)
 })

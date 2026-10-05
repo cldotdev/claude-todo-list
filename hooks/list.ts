@@ -41,8 +41,8 @@ const clip = (text: string) =>
     ? `${text.slice(0, HEAD_TEXT)}\n[truncated]\n${text.slice(HEAD_TEXT - MAX_TEXT)}`
     : text
 
-const block = (title: string, items: readonly string[]) =>
-  `${title}:\n${items.length === 0 ? '(none)' : JSON.stringify(items)}`
+const removedBlock = (done: readonly string[]) =>
+  `Items the user removed (never add them back):\n${done.length === 0 ? '(none)' : JSON.stringify(done)}`
 
 const numbered = (items: readonly TodoItem[]) =>
   items.length === 0
@@ -60,7 +60,7 @@ export function incrementalPrompt(input: {
 }): string {
   return [
     `Current list:\n${numbered(input.items)}`,
-    block('Items the user already ticked off (never add them back)', input.done),
+    removedBlock(input.done),
     `Agent final answer of the previous turn, which this turn's user message may reply to:\n${clip(input.previousAnswer) || '(none)'}`,
     `User message of this turn:\n${clip(input.userText) || '(none)'}`,
     `Agent final answer of this turn:\n${clip(input.answer) || '(none)'}`,
@@ -72,7 +72,7 @@ export function refreshPrompt(done: readonly string[]): string {
   return [
     'This request comes from the todo-list plugin, not from the user. Do not continue the conversation or call tools; answer only this request. Rebuild the to-do list of open items from the whole conversation above.',
     DEFINITION,
-    block('Items the user already ticked off (never add them back)', done),
+    removedBlock(done),
     LIST_FORMAT,
   ].join('\n\n')
 }
