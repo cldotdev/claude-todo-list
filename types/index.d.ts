@@ -15,6 +15,7 @@ declare module 'claude-code' {
       done: string[]
       focused: string
       detailed: string
+      deleting: string
       lastAnswer: string
       pending: PendingTurn[]
     }

@@ -34,6 +34,7 @@ function setup(
     return { text: e.text }
   })
   on('command.run', () => ({ text: '' }))
+  on('prompt.edit', (_$, e) => e as never)
   on('ui.render', $ => h($.ui.resolve(BAND).Text, null, 'engine band') as never)
   on('session.id', () => ({ value: 's1' }))
   on('settings.read', () => ({ value: settings }))
@@ -85,7 +86,7 @@ test('a normal answer updates the list and draws the band', async ($, on) => {
   expect(asked[0]).toContain('ask')
   const { texts, buttons } = await shown($)
   expect(texts.map(one => one.trim())).toContain('Todos')
-  expect(buttons).toBe(5)
+  expect(buttons).toBe(6)
 })
 
 test('subagent and aborted turns are skipped', async ($, on) => {
@@ -111,7 +112,7 @@ test('a failed or unparseable completion keeps the previous list', async ($, on)
   }
   const { texts, buttons } = await shown($)
   expect(texts.map(one => one.trim())).toContain('Todos')
-  expect(buttons).toBe(4)
+  expect(buttons).toBe(5)
 })
 
 // Moves the band's focus ring onto one of its Buttons, as Tab would.
@@ -139,7 +140,7 @@ test('the quote key quotes the focused item into the prompt', async ($, on) => {
   await ui.press({ key: 'quote' })
   await ui.unmount()
   expect(filled).toEqual(['> b\n> d-b\n\n'])
-  expect((await shown($)).buttons).toBe(5)
+  expect((await shown($)).buttons).toBe(6)
 })
 
 test('the focus ring skips the hidden hotkey Buttons and wraps around the rows', async ($, on) => {
@@ -167,12 +168,12 @@ test('/todos delete removes an item, records it and keeps it from coming back', 
 
   const removed = await $.command.run({ command: 'todos', args: 'delete 1', origin, presentation })
   expect(removed.text).toBe('Removed 1 item:\n1. a')
-  expect((await shown($)).buttons).toBe(4)
+  expect((await shown($)).buttons).toBe(5)
 
   await turn($, clock, {})
   expect(asked[1]).toContain('Items the user removed')
   expect(asked[1]).toContain('["a"]')
-  expect((await shown($)).buttons).toBe(4)
+  expect((await shown($)).buttons).toBe(5)
 })
 
 test('the band shows every item', async ($, on) => {
@@ -182,7 +183,7 @@ test('the band shows every item', async ($, on) => {
   await start($)
   await turn($, clock, {})
   const { texts, buttons } = await shown($)
-  expect(buttons).toBe(10)
+  expect(buttons).toBe(11)
   expect(texts.map(one => one.trim())).toContain('Todos')
 })
 
@@ -341,4 +342,115 @@ test('a detail is kept up to the cap and cut beyond it', async ($, on) => {
   await turn($, clock, {})
   const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
   expect(listed.text).toBe(`Todos\n1. a\n    ${'x'.repeat(MAX_DETAIL_LENGTH)}`)
+})
+
+const THREE = '{"remove":[],"add":[{"title":"a","detail":"d-a"},{"title":"b","detail":"d-b"},{"title":"c","detail":"d-c"}]}'
+
+// Starts a band over the items and returns the helpers the delete tests share.
+async function bandWith($: Engine, on: On, json: string, replies: Reply[] = []) {
+  const ctx = setup(on, [{ isAnswered: true, text: json }, ...replies])
+  await start($)
+  await turn($, ctx.clock, {})
+  const band = await $.ui.mount({ ...BAND, requestId: 'band' })
+  const listed = async () =>
+    (await $.command.run({ command: 'todos', args: '', origin, presentation })).text.split('\n').slice(1)
+  return { ...ctx, band, listed }
+}
+
+// The title text of the row the dot marks.
+async function dotted(band: Awaited<ReturnType<Engine['ui']['mount']>>) {
+  const texts = (await band.findAll({ type: 'Text' })).map(one => one.text)
+  const at = texts.indexOf('• ')
+  return at === -1 ? undefined : texts[at + 2]
+}
+
+test('the delete key arms on the first press and deletes on the second, recording the title', async ($, on) => {
+  const { asked, clock, band, listed } = await bandWith($, on, THREE, [{ isAnswered: true, text: THREE }])
+  await focusRow($, 1)
+  await band.press({ key: 'delete' })
+  expect(await listed()).toEqual(['1. a', '    d-a', '2. b', '    d-b', '3. c', '    d-c'])
+  expect((await shown($)).texts.join('|')).toContain('delete?')
+  expect((await shown($)).texts.join('|')).toContain('d: confirm delete | esc: cancel')
+  await band.press({ key: 'delete' })
+  expect(await listed()).toEqual(['1. a', '    d-a', '2. c', '    d-c'])
+  expect((await shown($)).texts.join('|')).not.toContain('delete?')
+  await band.unmount()
+
+  await turn($, clock, {})
+  expect(asked[1]).toContain('Items the user removed')
+  expect(asked[1]).toContain('["b"]')
+})
+
+test('moving the focus or pressing another band key between the two presses cancels the delete', async ($, on) => {
+  const { filled, band, listed } = await bandWith($, on, THREE)
+  await focusRow($, 0)
+  await band.press({ key: 'delete' })
+  await focusRow($, 1)
+  await band.press({ key: 'delete' })
+  expect(await listed()).toHaveLength(6)
+  await band.press({ key: 'quote' })
+  await band.press({ key: 'delete' })
+  expect(await listed()).toHaveLength(6)
+  expect(filled).toHaveLength(1)
+  await band.press({ key: 'delete' })
+  expect(await listed()).toHaveLength(4)
+  await band.unmount()
+})
+
+test('editing the prompt cancels a pending delete', async ($, on) => {
+  const { band, listed } = await bandWith($, on, THREE)
+  await focusRow($, 0)
+  await band.press({ key: 'delete' })
+  await $.prompt.edit({ text: 'x', inputText: 'x', cursor: 1, start: 1, end: 1 } as never)
+  await focusRow($, 0)
+  await band.press({ key: 'delete' })
+  expect(await listed()).toHaveLength(6)
+  await band.unmount()
+})
+
+test('deleting a middle item focuses the next one, and the last item the previous one', async ($, on) => {
+  const { clock, band, listed } = await bandWith($, on, THREE)
+  await focusRow($, 1)
+  await band.press({ key: 'delete' })
+  await band.press({ key: 'delete' })
+  await clock.advance(0)
+  expect(await dotted(band)).toBe('c')
+
+  await band.press({ key: 'delete' })
+  await band.press({ key: 'delete' })
+  await clock.advance(0)
+  expect(await dotted(band)).toBe('a')
+  expect(await listed()).toEqual(['1. a', '    d-a'])
+  await band.unmount()
+})
+
+test('deleting the only item removes the band', async ($, on) => {
+  const { clock, band } = await bandWith($, on, '{"remove":[],"add":[{"title":"a","detail":""}]}')
+  await focusRow($, 0)
+  await band.press({ key: 'delete' })
+  await band.press({ key: 'delete' })
+  await clock.advance(0)
+  await band.unmount()
+  expect((await shown($)).texts).toEqual(['engine band'])
+})
+
+test('deleting in the details view shows the next item detail', async ($, on) => {
+  const { clock, band } = await bandWith($, on, THREE)
+  await focusRow($, 0)
+  await band.press({ key: 'details' })
+  await band.press({ key: 'delete' })
+  await band.press({ key: 'delete' })
+  await clock.advance(0)
+  await band.unmount()
+  const texts = (await shown($)).texts
+  expect(texts).toContain('d-b')
+  expect(texts).not.toContain('d-a')
+})
+
+test('the delete key does nothing while no item is focused', async ($, on) => {
+  const { band, listed } = await bandWith($, on, THREE)
+  await band.press({ key: 'delete' })
+  await band.press({ key: 'delete' })
+  await band.unmount()
+  expect(await listed()).toHaveLength(6)
 })

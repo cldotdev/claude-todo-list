@@ -56,6 +56,7 @@ The band above the prompt shows the numbered list while it has items.
 | `o`/`enter` | Show the focused item's detail, or go back to the list. |
 | `v` | Quote the focused item into the prompt box. |
 | `y` | Quote every item, numbered, with blank lines between them to write under each. |
+| `d` | Delete the focused item; a second `d` confirms and `esc` cancels. |
 | `esc` | Return to the prompt. |
 
 ## Development

@@ -56,6 +56,7 @@ claude plugin install todo-list@claude-todo-list
 | `o`/`enter` | 顯示焦點所在事項的說明，或回到清單 |
 | `v` | 把焦點所在的事項引用到 prompt 輸入框 |
 | `y` | 引用所有事項並加上編號，事項之間留空行，方便在每項下面填寫 |
+| `d` | 刪除焦點所在的事項，要再按一次 `d` 確認，按 `esc` 取消 |
 | `esc` | 回到 prompt |
 
 ## 開發

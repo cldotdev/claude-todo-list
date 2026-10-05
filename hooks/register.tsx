@@ -26,6 +26,7 @@ const COMPLETE_TIMEOUT_MS = 60_000
 const DETAILS_KEY = 'o'
 const QUOTE_KEY = 'v'
 const QUOTE_ALL_KEY = 'y'
+const DELETE_KEY = 'd'
 // Characters the terminal draws two cells wide: CJK, Hangul, and full-width forms.
 const WIDE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/
 
@@ -57,6 +58,7 @@ const GUTTER = '  '
 // Palette index 6 (cyan), so the terminal theme picks the shade. A plugin's
 // color may not hold a colon, which rules out `ansi:cyan`.
 const NUMBER_COLOR = 'ansi256(6)'
+const DELETE_COLOR = 'ansi256(1)'
 
 const items = atom({ plugin: 'todo-list', key: 'items' } as const, [])
 const done = atom({ plugin: 'todo-list', key: 'done' } as const, [])
@@ -64,6 +66,8 @@ const done = atom({ plugin: 'todo-list', key: 'done' } as const, [])
 // outside the band), and the item whose detail the band shows.
 const focused = atom({ plugin: 'todo-list', key: 'focused' } as const, '')
 const detailed = atom({ plugin: 'todo-list', key: 'detailed' } as const, '')
+// The title of the item the first delete press armed; the next press deletes it.
+const deleting = atom({ plugin: 'todo-list', key: 'deleting' } as const, '')
 // The last main-loop answer, which the next user message often replies to.
 const lastAnswer = atom({ plugin: 'todo-list', key: 'lastAnswer' } as const, '')
 // Finished turns not yet applied. They live in $.state, not the module, because
@@ -101,6 +105,12 @@ let generation = 0
 // Whether a leave check is scheduled, so focus moves start only one.
 let isWatchingLeave = false
 
+async function disarm($: EngineInterface) {
+  if ((await read($, deleting)) !== '') {
+    await update($, deleting, () => '')
+  }
+}
+
 // The band raises no event when the person leaves it with Esc. While the dot
 // is shown, a timer asks the engine to put the ring back on the focused row;
 // the engine refuses once the band no longer holds the keys, and the refusal
@@ -120,6 +130,7 @@ function watchLeave($: EngineInterface, requestId: string) {
         return
       }
       await update($, focused, () => '')
+      await disarm($)
     }
     isWatchingLeave = false
   }
@@ -188,6 +199,7 @@ async function insertQuote($: EngineInterface, quoted: string) {
 }
 
 async function quoteFocused($: EngineInterface) {
+  await disarm($)
   const target = await read($, focused)
   const item = (await read($, items)).find(one => one.title === target)
   if (item !== undefined) {
@@ -196,6 +208,7 @@ async function quoteFocused($: EngineInterface) {
 }
 
 async function quoteEvery($: EngineInterface) {
+  await disarm($)
   const list = await read($, items)
   if (list.length > 0) {
     await insertQuote($, quoteNumbered(list, '\n\n\n'))
@@ -204,6 +217,7 @@ async function quoteEvery($: EngineInterface) {
 
 // Switches the band between the list and the focused item's detail.
 async function toggleDetails($: EngineInterface) {
+  await disarm($)
   if ((await read($, detailed)) !== '') {
     await update($, detailed, () => '')
     return
@@ -212,6 +226,27 @@ async function toggleDetails($: EngineInterface) {
   if ((await read($, items)).some(one => one.title === target)) {
     await update($, detailed, () => target)
   }
+}
+
+// The first press arms the focused item; the second deletes it and moves the
+// focus to the next item, or the previous one after the last. The ring tracks
+// its stop by position, so after the last row goes it may stand on a hotkey
+// Button; the leave check puts it back on the focused row.
+async function deleteFocused($: EngineInterface) {
+  const [list, target] = await Promise.all([read($, items), read($, focused)])
+  const index = list.findIndex(one => one.title === target)
+  if (index === -1) {
+    return
+  }
+  if ((await read($, deleting)) !== target) {
+    await update($, deleting, () => target)
+    return
+  }
+  await tick($, [target])
+  await disarm($)
+  const title = (list[index + 1] ?? list[index - 1])?.title ?? ''
+  await update($, focused, () => title)
+  await update($, detailed, shown => (shown === '' ? '' : title))
 }
 
 // Resolves to the new list, or null when the list was left as it was.
@@ -314,6 +349,7 @@ export const register: Register = on => {
     }
 
     await update($, focused, () => '')
+    await update($, deleting, () => '')
     if ((await read($, pending)).length > 0) {
       schedulePending($)
     }
@@ -336,6 +372,7 @@ export const register: Register = on => {
       await update($, items, () => [])
       await update($, done, () => [])
       await update($, detailed, () => '')
+      await update($, deleting, () => '')
       await $.store.delete(STORE_PREFIX + e.sessionId)
     }
 
@@ -352,6 +389,7 @@ export const register: Register = on => {
     if (isDetailed !== '') {
       await update($, detailed, () => '')
     }
+    await disarm($)
 
     return next(e)
   })
@@ -360,6 +398,7 @@ export const register: Register = on => {
     if ((await read($, focused)) !== '') {
       await update($, focused, () => '')
     }
+    await disarm($)
 
     return next(e)
   })
@@ -441,12 +480,18 @@ export const register: Register = on => {
       if ((await read($, focused)) !== '') {
         await update($, focused, () => '')
       }
+      await disarm($)
       return next(e)
     }
     if (e.plugin !== 'todo-list') {
       return next(e)
     }
-    const [list, current, shownTitle] = await Promise.all([read($, items), read($, focused), read($, detailed)])
+    const [list, current, shownTitle, armed] = await Promise.all([
+      read($, items),
+      read($, focused),
+      read($, detailed),
+      read($, deleting),
+    ])
     const last = list.length - 1
     let index = Number(e.element.slice(ROW_PREFIX.length))
     // The hidden hotkey Buttons are ring stops too. The event carries no
@@ -464,6 +509,9 @@ export const register: Register = on => {
       await update($, focused, () => item.title)
     }
     watchLeave($, e.requestId)
+    if (armed !== '' && armed !== item.title) {
+      await update($, deleting, () => '')
+    }
     // In the detail view, moving the focus walks from one item's detail to the next.
     if (shownTitle !== '' && shownTitle !== item.title) {
       await update($, detailed, () => item.title)
@@ -473,10 +521,11 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const [list, current, openTitle] = await Promise.all([
+    const [list, current, openTitle, armed] = await Promise.all([
       read($, items),
       read($, focused),
       read($, detailed),
+      read($, deleting),
     ])
     // While one item's detail is shown, the band shows that item alone.
     const opened = list.find(one => one.title === openTitle)
@@ -529,6 +578,12 @@ export const register: Register = on => {
                 {head}
                 {tail !== '' && <Text dimColor>{tail}</Text>}
               </Text>
+              {item.title === armed && (
+                <Text bold color={DELETE_COLOR}>
+                  {' '}
+                  delete?
+                </Text>
+              )}
             </Box>
           )
         })}
@@ -540,14 +595,18 @@ export const register: Register = on => {
         )}
         <Box flexDirection="row">
           <Text dimColor>
-            {GUTTER}ctrl+x tab: focus | tab/shift+tab: move | {DETAILS_KEY}/enter:{' '}
-            {opened === undefined ? 'details' : 'list'} | {QUOTE_KEY}: quote | {QUOTE_ALL_KEY}: quote all | esc: leave
+            {armed !== ''
+              ? `${GUTTER}${DELETE_KEY}: confirm delete | esc: cancel`
+              : `${GUTTER}ctrl+x tab: focus | tab/shift+tab: move | ${DETAILS_KEY}/enter: ${
+                  opened === undefined ? 'details' : 'list'
+                } | ${QUOTE_KEY}: quote | ${QUOTE_ALL_KEY}: quote all | ${DELETE_KEY}: delete | esc: leave`}
           </Text>
           {/* Holds the hotkeys out of sight: a drawn hotkey takes the accent color. */}
           <Box width={0} overflow="hidden">
             <Button key="details" label="details" hotkey={DETAILS_KEY} plain onPress={() => toggleDetails($)} />
             <Button key="quote" label="quote" hotkey={QUOTE_KEY} plain onPress={() => quoteFocused($)} />
             <Button key="quote-all" label="quote all" hotkey={QUOTE_ALL_KEY} plain onPress={() => quoteEvery($)} />
+            <Button key="delete" label="delete" hotkey={DELETE_KEY} plain onPress={() => deleteFocused($)} />
           </Box>
         </Box>
       </Box>
