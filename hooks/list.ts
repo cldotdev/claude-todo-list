@@ -8,8 +8,8 @@ const MAX_DETAIL_LENGTH = 300
 const MAX_TEXT = 100_000
 
 const DEFINITION = `An open item is something still pending in this conversation:
-- Work the user or the assistant deferred (for example "later", "not now", "先不做", "之後再處理", "next step").
-- A follow-up the assistant promised, or a check it said it had not run yet.
+- Work the user or the agent deferred (for example "later", "not now", "先不做", "之後再處理", "next step").
+- A follow-up the agent promised, or a check it said it had not run yet.
 - A decision or question raised in the discussion and not settled yet, whoever raised it: a choice among options waiting for the user, a question either side asked that has no answer or conclusion yet, or a point left to decide later.
 
 Do not list:
@@ -19,7 +19,7 @@ Do not list:
 
 Remove an item once the conversation shows it is done or the user drops it.`
 
-const ITEM_STYLE = `Write each item as an object with a "title" and a "detail", both in the language the assistant answers in.
+const ITEM_STYLE = `Write each item as an object with a "title" and a "detail", both in the language the agent answers in. Call the side that answers the user "the agent", never "the assistant"; in Chinese, keep it as the English word "agent", lowercase mid-sentence.
 - "title": one short line (at most ${MAX_ITEM_LENGTH} characters). Use half-width parentheses with a space before the opening one. End a title that carries a status, such as awaiting the user's reply or not yet tested, with that status in parentheses, written in the title's language, and nothing after it, as in "<what to do> (<status>)".
 - "detail": one to three sentences (at most ${MAX_DETAIL_LENGTH} characters) saying what to do, why it matters, and which part of the discussion it came from, so a reader who lost the conversation can act on it. Do not repeat the title.`
 
@@ -61,9 +61,9 @@ export function incrementalPrompt(input: {
   return [
     `Current list:\n${numbered(input.items)}`,
     block('Items the user already ticked off (never add them back)', input.done),
-    `Assistant final answer of the previous turn, which this turn's user message may reply to:\n${clip(input.previousAnswer) || '(none)'}`,
+    `Agent final answer of the previous turn, which this turn's user message may reply to:\n${clip(input.previousAnswer) || '(none)'}`,
     `User message of this turn:\n${clip(input.userText) || '(none)'}`,
-    `Assistant final answer of this turn:\n${clip(input.answer) || '(none)'}`,
+    `Agent final answer of this turn:\n${clip(input.answer) || '(none)'}`,
     'Return the changes.',
   ].join('\n\n')
 }

@@ -13,8 +13,8 @@ Long sessions leave decisions, promised follow-ups, and unanswered questions far
 ## How It Works
 
 - After each main-loop turn that ends with an answer, the mod sends the turn to Sonnet (the `sonnet` alias, so the model follows the installed Claude Code version) and asks which current items the turn resolved and which new ones it opened. Subagent turns do not count.
-- An open item is work someone deferred, a follow-up or check the assistant promised, or a question or decision that is not settled yet. The step being carried out right now, anything finished within the same turn, and tasks already listed in an OpenSpec `tasks.md` stay off the list.
-- Each item has a one-line title and a short detail, written in the language the assistant answers in.
+- An open item is work someone deferred, a follow-up or check the agent promised, or a question or decision that is not settled yet. The step being carried out right now, anything finished within the same turn, and tasks already listed in an OpenSpec `tasks.md` stay off the list.
+- Each item has a one-line title and a short detail, written in the language the agent answers in.
 - The list is kept per session and comes back when the session is resumed. A saved list left unchanged for longer than `cleanupPeriodDays`, the setting for how long Claude Code keeps transcripts (30 days by default), is dropped. `/clear` empties the list.
 - Items you delete are remembered, so the model does not add them back.
 
