@@ -3,7 +3,7 @@ import type { TodoItem } from '../types'
 const MAX_ITEMS = 99
 export const MAX_DONE = MAX_ITEMS
 const MAX_ITEM_LENGTH = 80
-const MAX_DETAIL_LENGTH = 300
+export const MAX_DETAIL_LENGTH = 1000
 // A guard against pasted logs, far above any normal turn.
 const MAX_TEXT = 100_000
 
@@ -21,7 +21,7 @@ Remove an item once the conversation shows it is done or the user drops it.`
 
 const ITEM_STYLE = `Write each item as an object with a "title" and a "detail", both in the language the agent answers in. Call the side that answers the user "the agent", never "the assistant"; in Chinese, keep it as the English word "agent", lowercase mid-sentence.
 - "title": one short line (at most ${MAX_ITEM_LENGTH} characters). Use half-width parentheses with a space before the opening one. End a title that carries a status, such as awaiting the user's reply or not yet tested, with that status in parentheses, written in the title's language, and nothing after it, as in "<what to do> (<status>)".
-- "detail": one to three sentences (at most ${MAX_DETAIL_LENGTH} characters) saying what to do, why it matters, and which part of the discussion it came from, so a reader who lost the conversation can act on it. Do not repeat the title.`
+- "detail": what to do, why it matters, and which part of the discussion it came from (at most ${MAX_DETAIL_LENGTH} characters), so a reader who lost the conversation can act on it. Do not repeat the title.`
 
 const LIST_FORMAT = `Reply with the complete list as a JSON array of {"title", "detail"} objects and nothing else: no code fence, no commentary, for example [{"title":"<title>","detail":"<detail>"}]. Reply with [] when nothing is open.
 ${ITEM_STYLE}`

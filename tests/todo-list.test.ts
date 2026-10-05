@@ -2,6 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { MAX_DETAIL_LENGTH } from '../hooks/list'
+
 const USAGE = { input_tokens: 1, output_tokens: 1 } as never
 const BAND = {
   plugin: 'todo-list',
@@ -328,4 +330,15 @@ test('a malformed or out-of-range /todos delete removes and sends nothing', asyn
   expect(submitted).toEqual([])
   const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
   expect(listed.text).toBe('Todos\n1. a\n2. b')
+})
+
+test('a detail is kept up to the cap and cut beyond it', async ($, on) => {
+  const long = 'x'.repeat(MAX_DETAIL_LENGTH + 50)
+  const { clock } = setup(on, [
+    { isAnswered: true, text: JSON.stringify({ remove: [], add: [{ title: 'a', detail: long }] }) },
+  ])
+  await start($)
+  await turn($, clock, {})
+  const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
+  expect(listed.text).toBe(`Todos\n1. a\n    ${'x'.repeat(MAX_DETAIL_LENGTH)}`)
 })

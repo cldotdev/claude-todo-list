@@ -241,7 +241,7 @@ async function incremental($: EngineInterface, turn: PendingTurn, gen: number) {
       effort: 'medium',
       system: SYSTEM,
       prompt: incrementalPrompt({ ...turn, items: sent, done: await read($, done) }),
-      maxTokens: 2048,
+      maxTokens: 8192,
       timeoutMs: COMPLETE_TIMEOUT_MS,
     })
     if (reply.isAnswered) {
