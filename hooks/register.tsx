@@ -49,6 +49,8 @@ function fit(text: string, cells: number): string {
 // A trailing parenthetical, such as an item's caveat, drawn apart from the rest.
 const NOTE = /^(.*?)\s*(\([^()]*\))$/
 const ROW_PREFIX = 'item-'
+// How often the band checks whether the person has left it with Esc.
+const LEAVE_CHECK_MS = 100
 // The width of a row's focus marker and the space after it, so the title and
 // the help line start where the item numbers do.
 const GUTTER = '  '
@@ -96,6 +98,40 @@ const userTexts = new Map<string, string>()
 let queue: Promise<unknown> = Promise.resolve()
 // Bumped by /clear so a job that started before it drops its result.
 let generation = 0
+// Whether a leave check is scheduled, so focus moves start only one.
+let isWatchingLeave = false
+
+// The band raises no event when the person leaves it with Esc. While the dot
+// is shown, a timer asks the engine to put the ring back on the focused row;
+// the engine refuses once the band no longer holds the keys, and the refusal
+// clears the dot.
+function watchLeave($: EngineInterface, requestId: string) {
+  if (isWatchingLeave) {
+    return
+  }
+  isWatchingLeave = true
+  const check = async () => {
+    const [list, current] = await Promise.all([read($, items), read($, focused)])
+    const index = list.findIndex(one => one.title === current)
+    if (index !== -1) {
+      const { deny } = await $.ui.focus({ requestId, key: `${ROW_PREFIX}${index}` })
+      if (deny === undefined) {
+        schedule()
+        return
+      }
+      await update($, focused, () => '')
+    }
+    isWatchingLeave = false
+  }
+  const schedule = () => {
+    $.clock.after(LEAVE_CHECK_MS, () => {
+      check().catch(() => {
+        isWatchingLeave = false
+      })
+    })
+  }
+  schedule()
+}
 
 function enqueue<T>(job: () => Promise<T>): Promise<T> {
   const run = queue.then(job)
@@ -306,8 +342,8 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // The band raises no event when the person leaves it, so typing in the prompt
-  // box is what tells the dot to go.
+  // Typing in the prompt box clears the dot without waiting for the leave
+  // check, and closes the detail view.
   on('prompt.edit', async ($, e, next) => {
     const [isFocused, isDetailed] = await Promise.all([read($, focused), read($, detailed)])
     if (isFocused !== '') {
@@ -424,7 +460,10 @@ export const register: Register = on => {
     if (item === undefined) {
       return next(e)
     }
-    await update($, focused, () => item.title)
+    if (current !== item.title) {
+      await update($, focused, () => item.title)
+    }
+    watchLeave($, e.requestId)
     // In the detail view, moving the focus walks from one item's detail to the next.
     if (shownTitle !== '' && shownTitle !== item.title) {
       await update($, detailed, () => item.title)
