@@ -1,6 +1,6 @@
 {
   "name": "todo-list",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Keeps a running list of open items from the conversation and shows it above the prompt.",
   "author": { "name": "Chienlung Huang" },
   "homepage": "https://github.com/cldotdev/claude-todo-list",
