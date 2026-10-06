@@ -33,3 +33,32 @@ jobs:
 
       - name: Test
         run: claude plugin test .
+
+      # Claude Code writes the typings only while it loads the mod, and neither
+      # validate nor test does that, so start a throwaway session, wait for the
+      # files, and stop it. The dummy key keeps it from needing a login; it
+      # never gets past retrying the API.
+      - name: Generate typings
+        if: runner.os == 'Linux'
+        run: |
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude-typings-config"
+          mkdir -p "$CLAUDE_CONFIG_DIR"
+          ANTHROPIC_API_KEY=sk-invalid setsid claude --plugin-dir . -p x >/dev/null 2>&1 &
+          pid=$!
+          found=
+          for _ in $(seq 60); do
+            if [ -f .claude-plugin/types/tsconfig.json ] && [ -s .claude-plugin/types/claude-code/index.d.ts ]; then
+              found=1
+              break
+            fi
+            sleep 1
+          done
+          kill -- "-$pid" 2>/dev/null || true
+          if [ -z "$found" ]; then
+            echo "::error::Claude Code did not write .claude-plugin/types within 60 s"
+            exit 1
+          fi
+
+      - name: Type check
+        if: runner.os == 'Linux'
+        run: npx -y -p typescript@7.0.2 tsc --noEmit -p .
