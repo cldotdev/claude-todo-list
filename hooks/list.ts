@@ -21,7 +21,7 @@ Remove an item once the conversation shows it is done or the user drops it.`
 
 const ITEM_STYLE = `Write each item as an object with a "title" and a "detail", both in the language the agent answers in. Call the side that answers the user "the agent", never "the assistant"; in Chinese, keep it as the English word "agent", lowercase mid-sentence.
 - "title": one short line (at most ${MAX_ITEM_LENGTH} characters). Use half-width parentheses with a space before the opening one. End a title that carries a status, such as awaiting the user's reply or not yet tested, with that status in parentheses, written in the title's language, and nothing after it, as in "<what to do> (<status>)".
-- "detail": what to do, why it matters, and which part of the discussion it came from (at most ${MAX_DETAIL_LENGTH} characters), so a reader who lost the conversation can act on it. Do not repeat the title.`
+- "detail": what to do, why it matters, and which part of the discussion it came from (at most ${MAX_DETAIL_LENGTH} characters, newlines included), so a reader who lost the conversation can act on it. Do not repeat the title. Put each distinct point on its own line, separated by a newline in the JSON string, as plain text with no Markdown bullets or headings.`
 
 const LIST_FORMAT = `Reply with the complete list as a JSON array of {"title", "detail"} objects and nothing else: no code fence, no commentary, for example [{"title":"<title>","detail":"<detail>"}]. Reply with [] when nothing is open.
 ${ITEM_STYLE}`
@@ -44,11 +44,18 @@ const clip = (text: string) =>
 const removedBlock = (done: readonly string[]) =>
   `Items the user removed (never add them back):\n${done.length === 0 ? '(none)' : JSON.stringify(done)}`
 
+// Prefixes every line of a multi-line text, such as an item's detail.
+export const prefixLines = (text: string, prefix: string) =>
+  text
+    .split('\n')
+    .map(line => `${prefix}${line}`)
+    .join('\n')
+
 const numbered = (items: readonly TodoItem[]) =>
   items.length === 0
     ? '(none)'
     : items
-        .map((one, i) => `${i + 1}. ${one.title}${one.detail === '' ? '' : `\n   ${one.detail}`}`)
+        .map((one, i) => `${i + 1}. ${one.title}${one.detail === '' ? '' : `\n${prefixLines(one.detail, '   ')}`}`)
         .join('\n')
 
 export function incrementalPrompt(input: {
@@ -94,6 +101,17 @@ export const normalizeParens = (text: string) =>
 
 const tidy = (text: string) => normalizeParens(text.replace(/\s+/g, ' '))
 
+// Keeps the line breaks of a detail, tidying each line and dropping empty ones.
+const tidyDetail = (text: string) =>
+  text
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map(tidy)
+    .filter(line => line !== '')
+    .join('\n')
+    .slice(0, MAX_DETAIL_LENGTH)
+    .trimEnd()
+
 // Normalizes, trims, deduplicates by title and caps a list of items.
 function cleanItems(items: readonly TodoItem[]): TodoItem[] {
   const seen = new Set<string>()
@@ -102,7 +120,7 @@ function cleanItems(items: readonly TodoItem[]): TodoItem[] {
     const title = tidy(one.title).slice(0, MAX_ITEM_LENGTH)
     if (title !== '' && !seen.has(title)) {
       seen.add(title)
-      kept.push({ title, detail: tidy(one.detail).slice(0, MAX_DETAIL_LENGTH) })
+      kept.push({ title, detail: tidyDetail(one.detail) })
     }
   }
   return kept.slice(0, MAX_ITEMS)

@@ -22,7 +22,7 @@ Each answered turn costs one extra Sonnet call. `/todos refresh` forks the main 
 
 ## Requirements
 
-Claude Code with mod support (>= 2.1.289).
+Claude Code with mod support (>= 2.1.290).
 
 ## Installation
 
@@ -51,13 +51,15 @@ The band above the prompt shows the numbered list while it has items.
 
 | Key | Action |
 | --- | --- |
-| `ctrl+x tab` | Focus the band. |
-| `tab`/`shift+tab` | Move to the next or previous item. |
-| `o`/`enter` | Show the focused item's detail, or go back to the list. |
-| `v` | Quote the focused item into the prompt box. |
-| `y` | Quote every item, numbered, with blank lines between them to write under each. |
-| `d` | Delete the focused item; a second `d` confirms and `esc` cancels. |
-| `esc` | Return to the prompt. |
+| `Ctrl+x Tab` | Focus the band. |
+| `j`/`k`, `Tab`/`Shift+Tab` | Move to the next or previous item. |
+| `s` | Select or unselect the focused item. |
+| `a` | Select every item, or clear the selection when every item is already selected. |
+| `p` | Paste the selected items, or the focused item when none is selected, into the prompt box. Each is quoted with its number in the band. |
+| `o`/`Enter` | Show the focused item's detail, or go back to the list. |
+| `b` | Ask `/btw` about the focused item. While Claude is working, the answer waits for the current turn to end. |
+| `d` | Delete the focused item; a second `d` confirms and `Esc` cancels. |
+| `Esc` | Return to the prompt. The band goes back to the list if it was showing an item's detail. |
 
 ## Development
 

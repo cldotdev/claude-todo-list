@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { Engine, MockClock } from 'claude-code/testing'
+import type { Engine, EngineCall, MockClock, Mounted } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { MAX_DETAIL_LENGTH } from '../hooks/list'
@@ -24,6 +24,8 @@ function setup(
   const filled: string[] = []
   const submitted: string[] = []
   const landed: (string | undefined)[] = []
+  const ran: { command: string; args: string }[] = []
+  const toasts: string[] = []
   const clock = mock.clock(on)
   mock.store(on, stored)
   on('session.start', () => ({ cwd: '/tmp' }))
@@ -33,7 +35,14 @@ function setup(
     submitted.push(e.text)
     return { text: e.text }
   })
-  on('command.run', () => ({ text: '' }))
+  on('command.run', (_$, e) => {
+    ran.push({ command: e.command, args: e.args })
+    return { text: '' }
+  })
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return {} as never
+  })
   on('prompt.edit', (_$, e) => e as never)
   on('ui.render', $ => h($.ui.resolve(BAND).Text, null, 'engine band') as never)
   on('session.id', () => ({ value: 's1' }))
@@ -52,7 +61,7 @@ function setup(
     const reply = replies.shift() ?? { isAnswered: false, reason: 'empty-reply' }
     return { value: { usage: USAGE, ...reply } as never }
   })
-  return { asked, clock, filled, landed, submitted }
+  return { asked, clock, filled, landed, ran, submitted, toasts }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -86,7 +95,7 @@ test('a normal answer updates the list and draws the band', async ($, on) => {
   expect(asked[0]).toContain('ask')
   const { texts, buttons } = await shown($)
   expect(texts.map(one => one.trim())).toContain('Todos')
-  expect(buttons).toBe(6)
+  expect(buttons).toBe(10)
 })
 
 test('subagent and aborted turns are skipped', async ($, on) => {
@@ -112,7 +121,7 @@ test('a failed or unparseable completion keeps the previous list', async ($, on)
   }
   const { texts, buttons } = await shown($)
   expect(texts.map(one => one.trim())).toContain('Todos')
-  expect(buttons).toBe(5)
+  expect(buttons).toBe(9)
 })
 
 // Moves the band's focus ring onto one of its Buttons, as Tab would.
@@ -130,17 +139,17 @@ const focusRow = ($: Engine, row: number) => focusOn($, `item-${row}`)
 const origin = { kind: 'plugin', name: 'test' } as never
 const presentation = { isFullscreen: false, columns: 80 } as never
 
-test('the quote key quotes the focused item into the prompt', async ($, on) => {
+test('the paste key pastes the focused item, numbered as in the band, when nothing is selected', async ($, on) => {
   const { clock, filled } = setup(on, [{ isAnswered: true, text: '{"remove":[],"add":[{"title":"a","detail":"d-a"},{"title":"b","detail":"d-b"}]}' }])
   await start($)
   await turn($, clock, {})
 
   const ui = await $.ui.mount({ ...BAND, requestId: 'band' })
   await focusRow($, 1)
-  await ui.press({ key: 'quote' })
+  await ui.press({ key: 'paste' })
   await ui.unmount()
-  expect(filled).toEqual(['> b\n> d-b\n\n'])
-  expect((await shown($)).buttons).toBe(6)
+  expect(filled).toEqual(['> 2. b\n>    d-b\n\n'])
+  expect((await shown($)).buttons).toBe(10)
 })
 
 test('the focus ring skips the hidden hotkey Buttons and wraps around the rows', async ($, on) => {
@@ -153,7 +162,7 @@ test('the focus ring skips the hidden hotkey Buttons and wraps around the rows',
   const ui = await $.ui.mount({ ...BAND, requestId: 'band' })
   await focusRow($, 2)
   await focusOn($, 'details')
-  await focusOn($, 'quote-all')
+  await focusOn($, 'select-all')
   await ui.unmount()
   expect(landed).toEqual(['item-2', 'item-0', 'item-2'])
 })
@@ -168,12 +177,12 @@ test('/todos delete removes an item, records it and keeps it from coming back', 
 
   const removed = await $.command.run({ command: 'todos', args: 'delete 1', origin, presentation })
   expect(removed.text).toBe('Removed 1 item:\n1. a')
-  expect((await shown($)).buttons).toBe(5)
+  expect((await shown($)).buttons).toBe(9)
 
   await turn($, clock, {})
   expect(asked[1]).toContain('Items the user removed')
   expect(asked[1]).toContain('["a"]')
-  expect((await shown($)).buttons).toBe(5)
+  expect((await shown($)).buttons).toBe(9)
 })
 
 test('the band shows every item', async ($, on) => {
@@ -183,7 +192,7 @@ test('the band shows every item', async ($, on) => {
   await start($)
   await turn($, clock, {})
   const { texts, buttons } = await shown($)
-  expect(buttons).toBe(11)
+  expect(buttons).toBe(15)
   expect(texts.map(one => one.trim())).toContain('Todos')
 })
 
@@ -192,21 +201,21 @@ test('/todos lists and clears', async ($, on) => {
   await start($)
   await turn($, clock, {})
   const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
-  expect(listed.text).toContain('1. a\n    d-a')
+  expect(listed.text).toContain('1. a\n   d-a')
   await $.command.run({ command: 'todos', args: 'clear', origin, presentation })
   const empty = await $.command.run({ command: 'todos', args: '', origin, presentation })
   expect(empty.text).toBe('No open items.')
 })
 
-test('a detail-less item quotes only its title', async ($, on) => {
+test('a detail-less item pastes only its numbered title', async ($, on) => {
   const { clock, filled } = setup(on, [{ isAnswered: true, text: '{"remove":[],"add":[{"title":"a","detail":""}]}' }])
   await start($)
   await turn($, clock, {})
   const ui = await $.ui.mount({ ...BAND, requestId: 'band' })
   await focusRow($, 0)
-  await ui.press({ key: 'quote' })
+  await ui.press({ key: 'paste' })
   await ui.unmount()
-  expect(filled).toEqual(['> a\n\n'])
+  expect(filled).toEqual(['> 1. a\n\n'])
 })
 
 test('a reply with string items keeps the previous list', async ($, on) => {
@@ -218,7 +227,7 @@ test('a reply with string items keeps the previous list', async ($, on) => {
   await turn($, clock, {})
   await turn($, clock, {})
   const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
-  expect(listed.text).toBe('Todos\n1. a\n    x')
+  expect(listed.text).toBe('Todos\n1. a\n   x')
 })
 
 test('stored string items migrate to items without a detail', async ($, on) => {
@@ -227,7 +236,7 @@ test('stored string items migrate to items without a detail', async ($, on) => {
   })
   await start($)
   const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
-  expect(listed.text).toBe('Todos\n1. old\n2. new\n    x')
+  expect(listed.text).toBe('Todos\n1. old\n2. new\n   x')
 })
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -253,7 +262,7 @@ test('an invalid cleanupPeriodDays keeps saved lists', async ($, on) => {
   expect(await listAfter40Days($, on, { cleanupPeriodDays: 0 })).toBe('Todos\n1. a')
 })
 
-test('the details key switches the band to the focused item and its detail, and back', async ($, on) => {
+test('the details key and Enter switch the band to the focused item and its detail, and back', async ($, on) => {
   const { clock } = setup(on, [
     { isAnswered: true, text: '{"remove":[],"add":[{"title":"a","detail":"d-a"},{"title":"b","detail":""}]}' },
   ])
@@ -270,22 +279,11 @@ test('the details key switches the band to the focused item and its detail, and 
   expect(opened).toContain('d-a')
   expect(opened).not.toContain('b')
 
+  // Enter presses the focused row's Button.
   const again = await $.ui.mount({ ...BAND, requestId: 'band' })
-  await again.press({ key: 'details' })
+  await again.press({ key: 'item-0' })
   await again.unmount()
   expect((await shown($)).texts).not.toContain('d-a')
-})
-
-test('the quote-all key quotes every item numbered', async ($, on) => {
-  const { clock, filled } = setup(on, [
-    { isAnswered: true, text: '{"remove":[],"add":[{"title":"a","detail":"d-a"},{"title":"b","detail":""}]}' },
-  ])
-  await start($)
-  await turn($, clock, {})
-  const ui = await $.ui.mount(BAND)
-  await ui.press({ key: 'quote-all' })
-  await ui.unmount()
-  expect(filled).toEqual(['> 1. a\n>    d-a\n\n\n\n> 2. b\n\n'])
 })
 
 test('/todos with a prompt sends every item and the prompt to the model', async ($, on) => {
@@ -297,7 +295,7 @@ test('/todos with a prompt sends every item and the prompt to the model', async 
   const sent = await $.command.run({ command: 'todos', args: '先做哪一項？', origin, presentation })
   expect(sent.text).toBe('Sent the prompt with 2 items.')
   await clock.advance(0)
-  expect(submitted).toEqual(['> 1. a\n>    d-a\n> 2. b\n\n先做哪一項？'])
+  expect(submitted).toEqual(['> 1. a\n>    d-a\n>\n> 2. b\n\n先做哪一項？'])
 })
 
 test('/todos delete takes ranges and space- or comma-separated numbers', async ($, on) => {
@@ -341,7 +339,53 @@ test('a detail is kept up to the cap and cut beyond it', async ($, on) => {
   await start($)
   await turn($, clock, {})
   const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
-  expect(listed.text).toBe(`Todos\n1. a\n    ${'x'.repeat(MAX_DETAIL_LENGTH)}`)
+  expect(listed.text).toBe(`Todos\n1. a\n   ${'x'.repeat(MAX_DETAIL_LENGTH)}`)
+})
+
+const MULTI = JSON.stringify({
+  remove: [],
+  add: [{ title: 'a\nb', detail: 'first  point\r\n\r\n  second\tpoint \r third' }],
+})
+
+test('a detail keeps its lines, each normalized, while a title stays one line', async ($, on) => {
+  const { clock } = setup(on, [{ isAnswered: true, text: MULTI }])
+  await start($)
+  await turn($, clock, {})
+  const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
+  expect(listed.text).toBe('Todos\n1. a b\n   first point\n   second point\n   third')
+})
+
+test('a detail cut at the cap leaves no trailing newline or space', async ($, on) => {
+  const cut = `${'x'.repeat(MAX_DETAIL_LENGTH - 1)}\ny`
+  const { clock } = setup(on, [
+    { isAnswered: true, text: JSON.stringify({ remove: [], add: [{ title: 'a', detail: cut }] }) },
+  ])
+  await start($)
+  await turn($, clock, {})
+  const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
+  expect(listed.text).toBe(`Todos\n1. a\n   ${'x'.repeat(MAX_DETAIL_LENGTH - 1)}`)
+})
+
+test('a paste quotes every line of a detail, aligned under its title', async ($, on) => {
+  const { filled, band } = await bandWith($, on, MULTI)
+  await focusRow($, 0)
+  await band.press({ key: 'paste' })
+  await band.unmount()
+  expect(filled).toEqual(['> 1. a b\n>    first point\n>    second point\n>    third\n\n'])
+})
+
+test('the prompt to the model indents every line of a detail', async ($, on) => {
+  const { asked, clock } = await bandWith($, on, MULTI, [{ isAnswered: true, text: '{"remove":[],"add":[]}' }])
+  await turn($, clock, {})
+  expect(asked[1]).toContain('Current list:\n1. a b\n   first point\n   second point\n   third')
+})
+
+test('the details view shows every line of a detail', async ($, on) => {
+  const { band } = await bandWith($, on, MULTI)
+  await focusRow($, 0)
+  await band.press({ key: 'details' })
+  await band.unmount()
+  expect((await shown($)).texts).toContain('first point\nsecond point\nthird')
 })
 
 const THREE = '{"remove":[],"add":[{"title":"a","detail":"d-a"},{"title":"b","detail":"d-b"},{"title":"c","detail":"d-c"}]}'
@@ -353,26 +397,26 @@ async function bandWith($: Engine, on: On, json: string, replies: Reply[] = []) 
   await turn($, ctx.clock, {})
   const band = await $.ui.mount({ ...BAND, requestId: 'band' })
   const listed = async () =>
-    (await $.command.run({ command: 'todos', args: '', origin, presentation })).text.split('\n').slice(1)
+    ((await $.command.run({ command: 'todos', args: '', origin, presentation })).text ?? '').split('\n').slice(1)
   return { ...ctx, band, listed }
 }
 
 // The title text of the row the dot marks.
-async function dotted(band: Awaited<ReturnType<Engine['ui']['mount']>>) {
+async function dotted(band: Mounted<'terminal', 'AbovePrompt'>) {
   const texts = (await band.findAll({ type: 'Text' })).map(one => one.text)
   const at = texts.indexOf('• ')
-  return at === -1 ? undefined : texts[at + 2]
+  return at === -1 ? undefined : texts[at + 3]
 }
 
 test('the delete key arms on the first press and deletes on the second, recording the title', async ($, on) => {
   const { asked, clock, band, listed } = await bandWith($, on, THREE, [{ isAnswered: true, text: THREE }])
   await focusRow($, 1)
   await band.press({ key: 'delete' })
-  expect(await listed()).toEqual(['1. a', '    d-a', '2. b', '    d-b', '3. c', '    d-c'])
+  expect(await listed()).toEqual(['1. a', '   d-a', '2. b', '   d-b', '3. c', '   d-c'])
   expect((await shown($)).texts.join('|')).toContain('delete?')
-  expect((await shown($)).texts.join('|')).toContain('d: confirm delete | esc: cancel')
+  expect((await shown($)).texts.join('|')).toContain('d to confirm delete · Esc to cancel')
   await band.press({ key: 'delete' })
-  expect(await listed()).toEqual(['1. a', '    d-a', '2. c', '    d-c'])
+  expect(await listed()).toEqual(['1. a', '   d-a', '2. c', '   d-c'])
   expect((await shown($)).texts.join('|')).not.toContain('delete?')
   await band.unmount()
 
@@ -388,10 +432,10 @@ test('moving the focus or pressing another band key between the two presses canc
   await focusRow($, 1)
   await band.press({ key: 'delete' })
   expect(await listed()).toHaveLength(6)
-  await band.press({ key: 'quote' })
+  await band.press({ key: 'select' })
   await band.press({ key: 'delete' })
   expect(await listed()).toHaveLength(6)
-  expect(filled).toHaveLength(1)
+  expect(filled).toHaveLength(0)
   await band.press({ key: 'delete' })
   expect(await listed()).toHaveLength(4)
   await band.unmount()
@@ -401,7 +445,9 @@ test('editing the prompt cancels a pending delete', async ($, on) => {
   const { band, listed } = await bandWith($, on, THREE)
   await focusRow($, 0)
   await band.press({ key: 'delete' })
-  await $.prompt.edit({ text: 'x', inputText: 'x', cursor: 1, start: 1, end: 1 } as never)
+  // The kit raises prompt.edit, but its typings leave `edit` off `$.prompt`.
+  const prompt = $.prompt as typeof $.prompt & { edit: EngineCall<'prompt.edit'> }
+  await prompt.edit({ text: 'x', inputText: 'x', cursor: 1, start: 1, end: 1 } as never)
   await focusRow($, 0)
   await band.press({ key: 'delete' })
   expect(await listed()).toHaveLength(6)
@@ -420,7 +466,7 @@ test('deleting a middle item focuses the next one, and the last item the previou
   await band.press({ key: 'delete' })
   await clock.advance(0)
   expect(await dotted(band)).toBe('a')
-  expect(await listed()).toEqual(['1. a', '    d-a'])
+  expect(await listed()).toEqual(['1. a', '   d-a'])
   await band.unmount()
 })
 
@@ -453,4 +499,143 @@ test('the delete key does nothing while no item is focused', async ($, on) => {
   await band.press({ key: 'delete' })
   await band.unmount()
   expect(await listed()).toHaveLength(6)
+})
+
+test('the help line shows only the focus key until the band holds the focus', async ($, on) => {
+  const { band } = await bandWith($, on, THREE)
+  const help = async () => (await band.findAll({ type: 'Text' })).map(one => one.text).at(-1)?.trim()
+  expect(await help()).toBe('Ctrl+x Tab to focus')
+  await focusRow($, 0)
+  expect(await help()).not.toContain('Ctrl+x Tab')
+  expect(await help()).toContain('Esc to leave')
+  expect(await help()).not.toContain('Shift+Tab')
+  await band.unmount()
+})
+
+// The kit has no ring to answer the band's own leave check, so the ring
+// leaving the band stands in for Esc; both end the same way.
+test('leaving the band takes it from the details view back to the list', async ($, on) => {
+  const { band } = await bandWith($, on, THREE)
+  await focusRow($, 0)
+  await band.press({ key: 'details' })
+  await $.ui.focus({ component: 'AbovePrompt', requestId: 'band', origin: { kind: 'person' } })
+  const texts = (await band.findAll({ type: 'Text' })).map(one => one.text.trim())
+  await band.unmount()
+  expect(texts).not.toContain('d-a')
+  expect(texts).toContain('b')
+  expect(texts).toContain('Ctrl+x Tab to focus')
+})
+
+const FIVE = JSON.stringify({
+  remove: [],
+  add: ['a', 'b', 'c', 'd', 'e'].map(title => ({ title, detail: `d-${title}` })),
+})
+
+const marks = async (band: Mounted<'terminal', 'AbovePrompt'>) =>
+  (await band.findAll({ type: 'Text' })).filter(one => one.text === '✓ ').length
+
+const helpOf = async (band: Mounted<'terminal', 'AbovePrompt'>) =>
+  (await band.findAll({ type: 'Text' })).map(one => one.text).at(-1)?.trim()
+
+test('the select key toggles the focused item and marks it', async ($, on) => {
+  const { band } = await bandWith($, on, THREE)
+  await band.press({ key: 'select' })
+  expect(await marks(band)).toBe(0)
+  await focusRow($, 1)
+  await band.press({ key: 'select' })
+  expect(await marks(band)).toBe(1)
+  expect(await helpOf(band)).toContain('p to paste 1')
+  await band.press({ key: 'select' })
+  expect(await marks(band)).toBe(0)
+  expect(await helpOf(band)).toContain('p to paste ·')
+  await band.unmount()
+})
+
+test('the select-all key selects every item and a second press clears them', async ($, on) => {
+  const { band } = await bandWith($, on, THREE)
+  await band.press({ key: 'select-all' })
+  expect(await marks(band)).toBe(3)
+  await band.press({ key: 'select-all' })
+  expect(await marks(band)).toBe(0)
+  await band.unmount()
+})
+
+test('the paste key pastes the selected items in list order with their band numbers, then clears the selection', async ($, on) => {
+  const { filled, band } = await bandWith($, on, FIVE)
+  await focusRow($, 4)
+  await band.press({ key: 'select' })
+  await focusRow($, 1)
+  await band.press({ key: 'select' })
+  expect(await helpOf(band)).toContain('p to paste 2')
+  await band.press({ key: 'paste' })
+  expect(filled).toEqual(['> 2. b\n>    d-b\n>\n> 5. e\n>    d-e\n\n'])
+  expect(await marks(band)).toBe(0)
+  expect(await dotted(band)).toBe('b')
+  await band.unmount()
+})
+
+test('a selected item that is deleted drops out of the paste', async ($, on) => {
+  const { clock, filled, band } = await bandWith($, on, THREE)
+  await band.press({ key: 'select-all' })
+  await focusRow($, 1)
+  await band.press({ key: 'delete' })
+  await band.press({ key: 'delete' })
+  await clock.advance(0)
+  expect(await marks(band)).toBe(2)
+  expect(await helpOf(band)).toContain('p to paste 2')
+  await band.press({ key: 'paste' })
+  expect(filled).toEqual(['> 1. a\n>    d-a\n>\n> 2. c\n>    d-c\n\n'])
+  await band.unmount()
+})
+
+test('leaving the band clears the selection', async ($, on) => {
+  const { band } = await bandWith($, on, THREE)
+  await focusRow($, 0)
+  await band.press({ key: 'select' })
+  expect(await marks(band)).toBe(1)
+  await $.ui.focus({ component: 'AbovePrompt', requestId: 'band', origin: { kind: 'person' } })
+  expect(await marks(band)).toBe(0)
+  await band.unmount()
+})
+
+test('the ask key runs /btw about the focused title, and toasts while Claude is working', async ($, on) => {
+  const { clock, ran, toasts } = setup(on, [{ isAnswered: true, text: THREE }])
+  await start($)
+  await turn($, clock, {})
+
+  const band = await $.ui.mount({ ...BAND, requestId: 'band' })
+  await band.press({ key: 'ask' })
+  expect(ran).toEqual([])
+  await focusRow($, 1)
+  await band.press({ key: 'ask' })
+  await clock.advance(0)
+  await band.unmount()
+  expect(ran).toHaveLength(1)
+  expect(ran[0]?.command).toBe('btw')
+  expect(ran[0]?.args).toContain('"b"')
+  expect(ran[0]?.args).not.toContain('d-b')
+  expect(toasts).toEqual([])
+
+  const busy = await $.ui.mount({ ...BAND, props: { hasSurvey: false, isWorking: true, maxRows: 20, bodyColumns: 80 } as never, requestId: 'band' })
+  await busy.press({ key: 'ask' })
+  await clock.advance(0)
+  await busy.unmount()
+  expect(ran).toHaveLength(2)
+  expect(toasts).toHaveLength(1)
+})
+
+test('numbers are padded so the titles under 1. and 11. start in one column', async ($, on) => {
+  const titles = [...'abcdefghijk']
+  const json = JSON.stringify({ remove: [], add: titles.map(title => ({ title, detail: `d-${title}` })) })
+  const { filled, band, listed } = await bandWith($, on, json)
+  await focusRow($, 10)
+  await band.press({ key: 'select' })
+  await focusRow($, 1)
+  await band.press({ key: 'select' })
+  await band.press({ key: 'paste' })
+  await band.unmount()
+  expect(filled).toEqual(['> 2.  b\n>     d-b\n>\n> 11. k\n>     d-k\n\n'])
+  const lines = await listed()
+  expect(lines[0]).toBe('1.  a')
+  expect(lines[20]).toBe('11. k')
 })

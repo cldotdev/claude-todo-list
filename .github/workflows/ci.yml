@@ -18,7 +18,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         # The pinned version is the one the README names; latest catches plugin
         # API changes before a release reaches users.
-        claude: ["2.1.289", latest]
+        claude: ["2.1.290", latest]
     defaults:
       run:
         shell: bash

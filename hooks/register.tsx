@@ -11,6 +11,7 @@ import {
   normalizeParens,
   parseItems,
   parseNumbers,
+  prefixLines,
   refreshPrompt,
 } from './list'
 
@@ -23,10 +24,17 @@ const COMPLETE_TIMEOUT_MS = 60_000
 // Rows take no hotkey: a digit hotkey also fires from an empty prompt, so a
 // message starting with "1." would quote the first item. A letter fires only
 // while the band holds the focus.
+const NEXT_KEY = 'j'
+const PREVIOUS_KEY = 'k'
 const DETAILS_KEY = 'o'
-const QUOTE_KEY = 'v'
-const QUOTE_ALL_KEY = 'y'
+const SELECT_KEY = 's'
+const SELECT_ALL_KEY = 'a'
+const PASTE_KEY = 'p'
+const ASK_KEY = 'b'
 const DELETE_KEY = 'd'
+// Not hotkeys: Enter presses the focused row's Button, which shows its detail.
+const ENTER_KEY = 'Enter'
+const LEAVE_KEY = 'Esc'
 // Characters the terminal draws two cells wide: CJK, Hangul, and full-width forms.
 const WIDE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/
 
@@ -55,6 +63,9 @@ const LEAVE_CHECK_MS = 100
 // The width of a row's focus marker and the space after it, so the title and
 // the help line start where the item numbers do.
 const GUTTER = '  '
+const SELECTED_MARK = '✓ '
+// The selection column's width, kept on every row so the layout does not shift.
+const SELECT_WIDTH = SELECTED_MARK.length
 // Palette index 6 (cyan), so the terminal theme picks the shade. A plugin's
 // color may not hold a colon, which rules out `ansi:cyan`.
 const NUMBER_COLOR = 'ansi256(6)'
@@ -68,6 +79,8 @@ const focused = atom({ plugin: 'todo-list', key: 'focused' } as const, '')
 const detailed = atom({ plugin: 'todo-list', key: 'detailed' } as const, '')
 // The title of the item the first delete press armed; the next press deletes it.
 const deleting = atom({ plugin: 'todo-list', key: 'deleting' } as const, '')
+// Titles of the items picked for a paste. Session-only: never written to the store.
+const selected = atom({ plugin: 'todo-list', key: 'selected' } as const, [] as string[])
 // The last main-loop answer, which the next user message often replies to.
 const lastAnswer = atom({ plugin: 'todo-list', key: 'lastAnswer' } as const, '')
 // Finished turns not yet applied. They live in $.state, not the module, because
@@ -105,16 +118,41 @@ let generation = 0
 // Whether a leave check is scheduled, so focus moves start only one.
 let isWatchingLeave = false
 
+// The selection as the list holds it now: a deleted item drops out.
+const pickedFrom = (list: readonly TodoItem[], titles: readonly string[]) =>
+  list.filter(one => titles.includes(one.title))
+
+async function setSelected($: EngineInterface, next: string[]) {
+  const same = (list: string[]) => list.length === next.length && list.every((title, i) => title === next[i])
+  if (!same(await read($, selected))) {
+    await update($, selected, () => next)
+  }
+}
+
 async function disarm($: EngineInterface) {
   if ((await read($, deleting)) !== '') {
     await update($, deleting, () => '')
   }
 }
 
+// The dot, the selection, a pending delete, and the detail view last only
+// while the band holds the focus.
+async function leave($: EngineInterface) {
+  const [current, shown] = await Promise.all([read($, focused), read($, detailed)])
+  if (current !== '') {
+    await update($, focused, () => '')
+  }
+  if (shown !== '') {
+    await update($, detailed, () => '')
+  }
+  await setSelected($, [])
+  await disarm($)
+}
+
 // The band raises no event when the person leaves it with Esc. While the dot
 // is shown, a timer asks the engine to put the ring back on the focused row;
 // the engine refuses once the band no longer holds the keys, and the refusal
-// clears the dot.
+// counts as leaving.
 function watchLeave($: EngineInterface, requestId: string) {
   if (isWatchingLeave) {
     return
@@ -129,8 +167,7 @@ function watchLeave($: EngineInterface, requestId: string) {
         schedule()
         return
       }
-      await update($, focused, () => '')
-      await disarm($)
+      await leave($)
     }
     isWatchingLeave = false
   }
@@ -175,43 +212,120 @@ async function tick($: EngineInterface, titles: readonly string[]) {
   await persist($)
 }
 
-// With a number, the detail lines up under the title.
-function quoteBlock(item: TodoItem, number?: number): string {
-  const label = number === undefined ? '' : `${number}. `
-  const lines = [`${label}${item.title}`]
-  if (item.detail !== '') {
-    lines.push(`${' '.repeat(label.length)}${item.detail}`)
-  }
-  return lines.map(line => `> ${line}\n`).join('')
+// `1. ` through `10. `, padded to the widest number so every title starts in
+// one column.
+const labelWidth = (last: number) => `${last}.`.length + 1
+const numberLabel = (number: number, width: number) => `${number}.`.padEnd(width)
+
+// The detail lines up under the title.
+function quoteBlock(item: TodoItem, number: number, width: number): string {
+  const label = numberLabel(number, width)
+  const text =
+    item.detail === ''
+      ? `${label}${item.title}`
+      : `${label}${item.title}\n${prefixLines(item.detail, ' '.repeat(label.length))}`
+  return `${prefixLines(text, '> ')}\n`
 }
 
-// Numbered as the list shows them, so a prompt can say "do 1 and 2, skip 3".
-// `gap` separates the items: empty lines in the prompt box leave room to write
-// under each one.
-const quoteNumbered = (list: readonly TodoItem[], gap = '') =>
-  list.map((item, i) => quoteBlock(item, i + 1)).join(gap)
+// Numbered as the list shows them, so a prompt can say "do 1 and 2, skip 3",
+// with a bare quote line between items.
+function quoteItems(list: readonly TodoItem[], picked: readonly TodoItem[]): string {
+  const numbers = picked.map(one => list.indexOf(one) + 1)
+  const width = labelWidth(Math.max(...numbers))
+  return picked.map((one, i) => quoteBlock(one, numbers[i]!, width)).join('>\n')
+}
 
-async function insertQuote($: EngineInterface, quoted: string) {
+async function insertQuote($: EngineInterface, quoted: string): Promise<boolean> {
   const filled = await $.prompt.fill({ text: `${quoted}\n`, mode: 'insert' })
   if (!filled.isFilled) {
     $.ui.toast('Could not insert into the prompt box. Close the dialog and try again.')
   }
+  return filled.isFilled
 }
 
-async function quoteFocused($: EngineInterface) {
+// Pastes the selected items, or the focused one when nothing is selected, each
+// numbered as in the band.
+async function paste($: EngineInterface) {
   await disarm($)
-  const target = await read($, focused)
-  const item = (await read($, items)).find(one => one.title === target)
-  if (item !== undefined) {
-    await insertQuote($, quoteBlock(item))
+  const [list, target, titles] = await Promise.all([read($, items), read($, focused), read($, selected)])
+  let picked = pickedFrom(list, titles)
+  if (picked.length === 0) {
+    picked = list.filter(one => one.title === target)
+  }
+  if (picked.length === 0) {
+    return
+  }
+  // A failed paste keeps the selection for the retry the toast asks for.
+  if (await insertQuote($, quoteItems(list, picked))) {
+    await setSelected($, [])
   }
 }
 
-async function quoteEvery($: EngineInterface) {
+async function toggleSelected($: EngineInterface) {
   await disarm($)
-  const list = await read($, items)
-  if (list.length > 0) {
-    await insertQuote($, quoteNumbered(list, '\n\n\n'))
+  const [list, target, titles] = await Promise.all([read($, items), read($, focused), read($, selected)])
+  if (!list.some(one => one.title === target)) {
+    return
+  }
+  const rest = pickedFrom(list, titles).map(one => one.title)
+  await setSelected($, rest.includes(target) ? rest.filter(title => title !== target) : [...rest, target])
+}
+
+async function toggleAll($: EngineInterface) {
+  await disarm($)
+  const [list, titles] = await Promise.all([read($, items), read($, selected)])
+  if (list.length === 0) {
+    return
+  }
+  const isAll = pickedFrom(list, titles).length === list.length
+  await setSelected($, isAll ? [] : list.map(one => one.title))
+}
+
+// Asks the built-in /btw about the focused item. It is not awaited: /btw
+// resolves only once it has run, which waits for the turn in progress to end.
+async function askAbout($: EngineInterface, isWorking: boolean) {
+  await disarm($)
+  const target = await read($, focused)
+  if (!(await read($, items)).some(one => one.title === target)) {
+    return
+  }
+  const args = `Tell me more about this open item from our conversation: "${target}". What is it, why is it still open, and what would close it? Answer in the language of the conversation.`
+  $.command.run({ command: 'btw', args }).catch(() => {
+    $.ui.toast('Could not ask /btw about this item.')
+  })
+  if (isWorking) {
+    $.ui.toast('The /btw answer will appear once the current turn ends.')
+  }
+}
+
+// Puts the dot on an item. A delete armed on another item is cancelled, and
+// the detail view walks from one item's detail to the next.
+async function focusItem($: EngineInterface, title: string) {
+  const [current, shownTitle, armed] = await Promise.all([read($, focused), read($, detailed), read($, deleting)])
+  if (current !== title) {
+    await update($, focused, () => title)
+  }
+  if (armed !== '' && armed !== title) {
+    await update($, deleting, () => '')
+  }
+  if (shownTitle !== '' && shownTitle !== title) {
+    await update($, detailed, () => title)
+  }
+}
+
+// Moves the ring to the next or previous row, wrapping around as Tab does. The
+// move skips this plugin's own ui.focus hook, so the dot moves here; left
+// behind, the leave check would pull the ring back to the old row.
+async function moveFocus($: EngineInterface, requestId: string, step: 1 | -1) {
+  const [list, current] = await Promise.all([read($, items), read($, focused)])
+  const index = list.findIndex(one => one.title === current)
+  if (index === -1) {
+    return
+  }
+  const target = (index + step + list.length) % list.length
+  const { deny } = await $.ui.focus({ requestId, key: `${ROW_PREFIX}${target}` })
+  if (deny === undefined) {
+    await focusItem($, list[target]!.title)
   }
 }
 
@@ -308,6 +422,19 @@ const schedulePending = ($: EngineInterface) => {
   })
 }
 
+// The band's own keys work only while it holds the focus.
+function helpLine(isFocused: boolean, isArmed: boolean, isDetailed: boolean, selectedCount: number): string {
+  if (!isFocused) {
+    return 'Ctrl+x Tab to focus'
+  }
+  if (isArmed) {
+    return `${DELETE_KEY} to confirm delete · ${LEAVE_KEY} to cancel`
+  }
+  const pasting = selectedCount > 0 ? `${PASTE_KEY} to paste ${selectedCount}` : `${PASTE_KEY} to paste`
+  const toggle = isDetailed ? 'list' : 'details'
+  return `${NEXT_KEY}/${PREVIOUS_KEY} to move · ${SELECT_KEY} to select · ${SELECT_ALL_KEY} to select all · ${pasting} · ${DETAILS_KEY}/${ENTER_KEY} to show ${toggle} · ${ASK_KEY} to ask /btw · ${DELETE_KEY} to delete · ${LEAVE_KEY} to leave`
+}
+
 const itemCount = (n: number) => `${n} ${n === 1 ? 'item' : 'items'}`
 
 async function refresh($: EngineInterface, gen: number): Promise<string> {
@@ -373,32 +500,22 @@ export const register: Register = on => {
       await update($, done, () => [])
       await update($, detailed, () => '')
       await update($, deleting, () => '')
+      await update($, selected, () => [])
       await $.store.delete(STORE_PREFIX + e.sessionId)
     }
 
     return next(e)
   })
 
-  // Typing in the prompt box clears the dot without waiting for the leave
-  // check, and closes the detail view.
+  // Typing in the prompt box leaves the band without waiting for the leave check.
   on('prompt.edit', async ($, e, next) => {
-    const [isFocused, isDetailed] = await Promise.all([read($, focused), read($, detailed)])
-    if (isFocused !== '') {
-      await update($, focused, () => '')
-    }
-    if (isDetailed !== '') {
-      await update($, detailed, () => '')
-    }
-    await disarm($)
+    await leave($)
 
     return next(e)
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if ((await read($, focused)) !== '') {
-      await update($, focused, () => '')
-    }
-    await disarm($)
+    await leave($)
 
     return next(e)
   })
@@ -456,7 +573,7 @@ export const register: Register = on => {
       if (list.length === 0) {
         return { text: 'No open items; the prompt was not sent.' }
       }
-      const text = `${quoteNumbered(list)}\n${arg}`
+      const text = `${quoteItems(list, list)}\n${arg}`
       // The engine refuses a submit from command.run, which holds the turn the
       // prompt would wait for; a timer sends it once the command has answered.
       $.clock.after(0, () => {
@@ -468,30 +585,23 @@ export const register: Register = on => {
     if (list.length === 0) {
       return { text: 'No open items.' }
     }
+    const width = labelWidth(list.length)
     const lines = list.flatMap((one, i) => {
-      const title = `${i + 1}. ${one.title}`
-      return one.detail === '' ? [title] : [title, `    ${one.detail}`]
+      const title = `${numberLabel(i + 1, width)}${one.title}`
+      return one.detail === '' ? [title] : [title, prefixLines(one.detail, ' '.repeat(width))]
     })
     return { text: ['Todos', ...lines].join('\n') }
   })
 
   on('ui.focus', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.element === undefined) {
-      if ((await read($, focused)) !== '') {
-        await update($, focused, () => '')
-      }
-      await disarm($)
+      await leave($)
       return next(e)
     }
     if (e.plugin !== 'todo-list') {
       return next(e)
     }
-    const [list, current, shownTitle, armed] = await Promise.all([
-      read($, items),
-      read($, focused),
-      read($, detailed),
-      read($, deleting),
-    ])
+    const [list, current] = await Promise.all([read($, items), read($, focused)])
     const last = list.length - 1
     let index = Number(e.element.slice(ROW_PREFIX.length))
     // The hidden hotkey Buttons are ring stops too. The event carries no
@@ -505,28 +615,22 @@ export const register: Register = on => {
     if (item === undefined) {
       return next(e)
     }
-    if (current !== item.title) {
-      await update($, focused, () => item.title)
-    }
+    await focusItem($, item.title)
     watchLeave($, e.requestId)
-    if (armed !== '' && armed !== item.title) {
-      await update($, deleting, () => '')
-    }
-    // In the detail view, moving the focus walks from one item's detail to the next.
-    if (shownTitle !== '' && shownTitle !== item.title) {
-      await update($, detailed, () => item.title)
-    }
 
     return next({ ...e, element: `${ROW_PREFIX}${index}` })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const [list, current, openTitle, armed] = await Promise.all([
+    const [list, current, openTitle, armed, selectedTitles] = await Promise.all([
       read($, items),
       read($, focused),
       read($, detailed),
       read($, deleting),
+      read($, selected),
     ])
+    const picked = pickedFrom(list, selectedTitles)
+    const { isWorking } = e.props
     // While one item's detail is shown, the band shows that item alone.
     const opened = list.find(one => one.title === openTitle)
     if (list.length === 0 || e.props.hasSurvey) {
@@ -534,8 +638,7 @@ export const register: Register = on => {
     }
 
     const { Box, Button, Text } = $.ui.resolve(e)
-    // `1. ` through `10. `, so every item's text starts in one column.
-    const numberWidth = `${list.length}.`.length + 1
+    const numberWidth = labelWidth(list.length)
 
     return (
       <Box flexDirection="column">
@@ -544,7 +647,7 @@ export const register: Register = on => {
         {list.map((item, i) => {
           // The focus ring tracks its stop by position, so every row keeps its
           // Button in every view; dropping the hidden rows' Buttons would slide
-          // the ring onto the next stop, the quote Button.
+          // the ring onto the next stop, the first hotkey Button.
           const button = (
             <Button key={`${ROW_PREFIX}${i}`} label=" " plain onPress={() => toggleDetails($)} />
           )
@@ -558,7 +661,7 @@ export const register: Register = on => {
           // Items stored before parentheses were normalized still need normalizing here.
           const shown = normalizeParens(item.title)
           const [, main = shown] = NOTE.exec(shown) ?? []
-          const room = e.props.bodyColumns - GUTTER.length - numberWidth
+          const room = e.props.bodyColumns - GUTTER.length - SELECT_WIDTH - numberWidth
           const isFocused = item.title === current
           const isLong = !isFocused && opened === undefined && cellWidth(shown) > room
           // The cut may end inside the note.
@@ -573,7 +676,8 @@ export const register: Register = on => {
                 {button}
               </Box>
               <Text>{isFocused ? '• ' : '  '}</Text>
-              <Text color={NUMBER_COLOR}>{`${i + 1}.`.padEnd(numberWidth)}</Text>
+              <Text>{picked.includes(item) ? SELECTED_MARK : ' '.repeat(SELECT_WIDTH)}</Text>
+              <Text color={NUMBER_COLOR}>{numberLabel(i + 1, numberWidth)}</Text>
               <Text wrap={isLong ? 'truncate-end' : 'wrap'}>
                 {head}
                 {tail !== '' && <Text dimColor>{tail}</Text>}
@@ -589,23 +693,24 @@ export const register: Register = on => {
         })}
         {opened !== undefined && (
           <Box flexDirection="row">
-            <Text>{' '.repeat(GUTTER.length + numberWidth)}</Text>
+            <Text>{' '.repeat(GUTTER.length + SELECT_WIDTH + numberWidth)}</Text>
             <Text wrap="wrap">{opened.detail || '(No detail. Run /todos refresh to add one.)'}</Text>
           </Box>
         )}
         <Box flexDirection="row">
           <Text dimColor>
-            {armed !== ''
-              ? `${GUTTER}${DELETE_KEY}: confirm delete | esc: cancel`
-              : `${GUTTER}ctrl+x tab: focus | tab/shift+tab: move | ${DETAILS_KEY}/enter: ${
-                  opened === undefined ? 'details' : 'list'
-                } | ${QUOTE_KEY}: quote | ${QUOTE_ALL_KEY}: quote all | ${DELETE_KEY}: delete | esc: leave`}
+            {GUTTER}
+            {helpLine(current !== '', armed !== '', opened !== undefined, picked.length)}
           </Text>
           {/* Holds the hotkeys out of sight: a drawn hotkey takes the accent color. */}
           <Box width={0} overflow="hidden">
+            <Button key="next" label="next" hotkey={NEXT_KEY} plain onPress={() => moveFocus($, e.requestId, 1)} />
+            <Button key="previous" label="previous" hotkey={PREVIOUS_KEY} plain onPress={() => moveFocus($, e.requestId, -1)} />
             <Button key="details" label="details" hotkey={DETAILS_KEY} plain onPress={() => toggleDetails($)} />
-            <Button key="quote" label="quote" hotkey={QUOTE_KEY} plain onPress={() => quoteFocused($)} />
-            <Button key="quote-all" label="quote all" hotkey={QUOTE_ALL_KEY} plain onPress={() => quoteEvery($)} />
+            <Button key="paste" label="paste" hotkey={PASTE_KEY} plain onPress={() => paste($)} />
+            <Button key="select" label="select" hotkey={SELECT_KEY} plain onPress={() => toggleSelected($)} />
+            <Button key="select-all" label="select all" hotkey={SELECT_ALL_KEY} plain onPress={() => toggleAll($)} />
+            <Button key="ask" label="ask" hotkey={ASK_KEY} plain onPress={() => askAbout($, isWorking)} />
             <Button key="delete" label="delete" hotkey={DELETE_KEY} plain onPress={() => deleteFocused($)} />
           </Box>
         </Box>
