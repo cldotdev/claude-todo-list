@@ -428,11 +428,11 @@ function helpLine(isFocused: boolean, isArmed: boolean, isDetailed: boolean, sel
     return 'Ctrl+x Tab to focus'
   }
   if (isArmed) {
-    return `${DELETE_KEY} to confirm delete · ${LEAVE_KEY} to cancel`
+    return `${DELETE_KEY} confirm delete · ${LEAVE_KEY} cancel`
   }
-  const pasting = selectedCount > 0 ? `${PASTE_KEY} to paste ${selectedCount}` : `${PASTE_KEY} to paste`
+  const pasting = selectedCount > 0 ? `${PASTE_KEY} paste ${selectedCount}` : `${PASTE_KEY} paste`
   const toggle = isDetailed ? 'list' : 'details'
-  return `${NEXT_KEY}/${PREVIOUS_KEY} to move · ${SELECT_KEY} to select · ${SELECT_ALL_KEY} to select all · ${pasting} · ${DETAILS_KEY}/${ENTER_KEY} to show ${toggle} · ${ASK_KEY} to ask /btw · ${DELETE_KEY} to delete · ${LEAVE_KEY} to leave`
+  return `${NEXT_KEY}/${PREVIOUS_KEY} move · ${SELECT_KEY} select · ${SELECT_ALL_KEY} select all · ${pasting} · ${DETAILS_KEY}/${ENTER_KEY} show ${toggle} · ${ASK_KEY} ask /btw · ${DELETE_KEY} delete · ${LEAVE_KEY} leave`
 }
 
 const itemCount = (n: number) => `${n} ${n === 1 ? 'item' : 'items'}`
