@@ -63,12 +63,10 @@ const LEAVE_CHECK_MS = 100
 // The width of a row's focus marker and the space after it, so the title and
 // the help line start where the item numbers do.
 const GUTTER = '  '
-const SELECTED_MARK = '✓ '
-// The selection column's width, kept on every row so the layout does not shift.
-const SELECT_WIDTH = SELECTED_MARK.length
-// Palette index 6 (cyan), so the terminal theme picks the shade. A plugin's
-// color may not hold a colon, which rules out `ansi:cyan`.
-const NUMBER_COLOR = 'ansi256(6)'
+// A theme key, so a selected row follows the person's theme.
+const SELECTED_COLOR = 'suggestion'
+// Palette index 1 (red), so the terminal theme picks the shade. A plugin's
+// color may not hold a colon, which rules out `ansi:red`.
 const DELETE_COLOR = 'ansi256(1)'
 
 const items = atom({ plugin: 'todo-list', key: 'items' } as const, [])
@@ -661,8 +659,9 @@ export const register: Register = on => {
           // Items stored before parentheses were normalized still need normalizing here.
           const shown = normalizeParens(item.title)
           const [, main = shown] = NOTE.exec(shown) ?? []
-          const room = e.props.bodyColumns - GUTTER.length - SELECT_WIDTH - numberWidth
+          const room = e.props.bodyColumns - GUTTER.length - numberWidth
           const isFocused = item.title === current
+          const color = picked.includes(item) ? SELECTED_COLOR : undefined
           const isLong = !isFocused && opened === undefined && cellWidth(shown) > room
           // The cut may end inside the note.
           const cut = isLong ? fit(shown, room) : shown
@@ -676,9 +675,8 @@ export const register: Register = on => {
                 {button}
               </Box>
               <Text>{isFocused ? '• ' : '  '}</Text>
-              <Text>{picked.includes(item) ? SELECTED_MARK : ' '.repeat(SELECT_WIDTH)}</Text>
-              <Text color={NUMBER_COLOR}>{numberLabel(i + 1, numberWidth)}</Text>
-              <Text wrap={isLong ? 'truncate-end' : 'wrap'}>
+              <Text color={color}>{numberLabel(i + 1, numberWidth)}</Text>
+              <Text color={color} wrap={isLong ? 'truncate-end' : 'wrap'}>
                 {head}
                 {tail !== '' && <Text dimColor>{tail}</Text>}
               </Text>
@@ -693,7 +691,7 @@ export const register: Register = on => {
         })}
         {opened !== undefined && (
           <Box flexDirection="row">
-            <Text>{' '.repeat(GUTTER.length + SELECT_WIDTH + numberWidth)}</Text>
+            <Text>{' '.repeat(GUTTER.length + numberWidth)}</Text>
             <Text wrap="wrap">{opened.detail || '(No detail. Run /todos refresh to add one.)'}</Text>
           </Box>
         )}

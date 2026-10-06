@@ -405,7 +405,7 @@ async function bandWith($: Engine, on: On, json: string, replies: Reply[] = []) 
 async function dotted(band: Mounted<'terminal', 'AbovePrompt'>) {
   const texts = (await band.findAll({ type: 'Text' })).map(one => one.text)
   const at = texts.indexOf('• ')
-  return at === -1 ? undefined : texts[at + 3]
+  return at === -1 ? undefined : texts[at + 2]
 }
 
 test('the delete key arms on the first press and deletes on the second, recording the title', async ($, on) => {
@@ -531,8 +531,9 @@ const FIVE = JSON.stringify({
   add: ['a', 'b', 'c', 'd', 'e'].map(title => ({ title, detail: `d-${title}` })),
 })
 
+// Selected rows color their number.
 const marks = async (band: Mounted<'terminal', 'AbovePrompt'>) =>
-  (await band.findAll({ type: 'Text' })).filter(one => one.text === '✓ ').length
+  (await band.findAll({ type: 'Text', text: /^\d+\. *$/ })).filter(one => one.props.color !== undefined).length
 
 const helpOf = async (band: Mounted<'terminal', 'AbovePrompt'>) =>
   (await band.findAll({ type: 'Text' })).map(one => one.text).at(-1)?.trim()
