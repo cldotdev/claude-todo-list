@@ -41,7 +41,7 @@ function setup(
   })
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
-    return {} as never
+    return { value: undefined }
   })
   on('prompt.edit', (_$, e) => e as never)
   on('ui.render', $ => h($.ui.resolve(BAND).Text, null, 'engine band') as never)
