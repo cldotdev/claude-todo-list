@@ -51,7 +51,7 @@ claude plugin install todo-list@claude-todo-list
 
 | 按鍵 | 動作 |
 | --- | --- |
-| `Ctrl+x Tab` | 把焦點移到 band |
+| `Ctrl+X Tab` | 把焦點移到 band |
 | `j`/`k`、`Tab`/`Shift+Tab` | 移到下一個或上一個事項 |
 | `s` | 選取或取消選取焦點所在的事項 |
 | `a` | 選取所有事項，所有事項都已選取時則清除選取 |

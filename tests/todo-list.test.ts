@@ -504,9 +504,9 @@ test('the delete key does nothing while no item is focused', async ($, on) => {
 test('the help line shows only the focus key until the band holds the focus', async ($, on) => {
   const { band } = await bandWith($, on, THREE)
   const help = async () => (await band.findAll({ type: 'Text' })).map(one => one.text).at(-1)?.trim()
-  expect(await help()).toBe('Ctrl+x Tab to focus')
+  expect(await help()).toBe('Ctrl+X Tab to focus')
   await focusRow($, 0)
-  expect(await help()).not.toContain('Ctrl+x Tab')
+  expect(await help()).not.toContain('Ctrl+X Tab')
   expect(await help()).toContain('Esc leave')
   expect(await help()).not.toContain('Shift+Tab')
   await band.unmount()
@@ -523,7 +523,7 @@ test('leaving the band takes it from the details view back to the list', async (
   await band.unmount()
   expect(texts).not.toContain('d-a')
   expect(texts).toContain('b')
-  expect(texts).toContain('Ctrl+x Tab to focus')
+  expect(texts).toContain('Ctrl+X Tab to focus')
 })
 
 const FIVE = JSON.stringify({

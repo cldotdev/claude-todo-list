@@ -423,7 +423,7 @@ const schedulePending = ($: EngineInterface) => {
 // The band's own keys work only while it holds the focus.
 function helpLine(isFocused: boolean, isArmed: boolean, isDetailed: boolean, selectedCount: number): string {
   if (!isFocused) {
-    return 'Ctrl+x Tab to focus'
+    return 'Ctrl+X Tab to focus'
   }
   if (isArmed) {
     return `${DELETE_KEY} confirm delete · ${LEAVE_KEY} cancel`

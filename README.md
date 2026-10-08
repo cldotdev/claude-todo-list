@@ -51,7 +51,7 @@ The band above the prompt shows the numbered list while it has items.
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+x Tab` | Focus the band. |
+| `Ctrl+X Tab` | Focus the band. |
 | `j`/`k`, `Tab`/`Shift+Tab` | Move to the next or previous item. |
 | `s` | Select or unselect the focused item. |
 | `a` | Select every item, or clear the selection when every item is already selected. |
