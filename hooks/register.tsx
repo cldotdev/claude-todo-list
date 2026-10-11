@@ -1,18 +1,28 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { PendingTurn, TodoItem, TodoListState } from '../types'
+import type { PendingTurn, ReviewTurn, TodoItem, TodoListState, TrashEntry } from '../types'
 import {
-  MAX_DONE,
+  MAX_TRASH,
+  REVIEW_MIN_ITEMS,
+  REVIEW_MIN_TURNS,
+  REVIEW_SYSTEM,
+  REVIEW_TURNS,
   SYSTEM,
+  type RemovedTitles,
   applyChanges,
+  applyRefresh,
+  applyReview,
+  cleanItems,
   isItem,
   incrementalPrompt,
   normalizeParens,
-  parseItems,
   parseNumbers,
   prefixLines,
   refreshPrompt,
+  renderTranscript,
+  removedTitles,
+  reviewPrompt,
 } from './list'
 
 const MODEL = 'sonnet'
@@ -21,6 +31,8 @@ const DAY_MS = 24 * 60 * 60 * 1000
 // Claude Code's own default for cleanupPeriodDays.
 const DEFAULT_CLEANUP_DAYS = 30
 const COMPLETE_TIMEOUT_MS = 60_000
+// The transcript fallback sends up to TRANSCRIPT_TEXT characters to the main model.
+const TRANSCRIPT_TIMEOUT_MS = 180_000
 // Rows take no hotkey: a digit hotkey also fires from an empty prompt, so a
 // message starting with "1." would quote the first item. A letter fires only
 // while the band holds the focus.
@@ -70,7 +82,10 @@ const SELECTED_COLOR = 'suggestion'
 const DELETE_COLOR = 'ansi256(1)'
 
 const items = atom({ plugin: 'todo-list', key: 'items' } as const, [])
-const done = atom({ plugin: 'todo-list', key: 'done' } as const, [])
+const trash = atom({ plugin: 'todo-list', key: 'trash' } as const, [] as TrashEntry[])
+// The counted turns since the last review. Like `pending`, it needs no store: a
+// resumed session starts a new window.
+const review = atom({ plugin: 'todo-list', key: 'review' } as const, [] as ReviewTurn[])
 // Titles: the item the band's focus ring stands on ('' while the ring is
 // outside the band), and the item whose detail the band shows.
 const focused = atom({ plugin: 'todo-list', key: 'focused' } as const, '')
@@ -86,19 +101,42 @@ const lastAnswer = atom({ plugin: 'todo-list', key: 'lastAnswer' } as const, '')
 // waits here, and session.start, which runs again after the reload, picks it up.
 const pending = atom({ plugin: 'todo-list', key: 'pending' } as const, [] as PendingTurn[])
 
-// An entry saved before items had a detail holds plain strings.
-type Stored = { items: (string | TodoItem)[]; done: string[]; updatedAt: number }
+// An entry saved before items had a detail holds plain strings, and one saved
+// before the trash holds the titles the user removed as `done`.
+type Stored = {
+  items: (string | TodoItem)[]
+  trash?: TrashEntry[]
+  done?: string[]
+  updatedAt: number
+}
+
+const isTrashEntry = (value: unknown): value is TrashEntry =>
+  isItem(value) &&
+  ((value as TrashEntry).by === 'user' || (value as TrashEntry).by === 'model') &&
+  typeof (value as TrashEntry).at === 'number'
 
 const isStored = (value: unknown): value is Stored =>
   typeof value === 'object' &&
   value !== null &&
   Array.isArray((value as Stored).items) &&
   (value as Stored).items.every(one => typeof one === 'string' || isItem(one)) &&
-  Array.isArray((value as Stored).done) &&
+  ((value as Stored).trash === undefined ||
+    (Array.isArray((value as Stored).trash) && ((value as Stored).trash ?? []).every(isTrashEntry))) &&
+  (Array.isArray((value as Stored).trash) || Array.isArray((value as Stored).done)) &&
   typeof (value as Stored).updatedAt === 'number'
 
 const migrate = (stored: (string | TodoItem)[]): TodoItem[] =>
   stored.map(one => (typeof one === 'string' ? { title: one, detail: '' } : one))
+
+const loadTrash = (stored: Stored): TrashEntry[] =>
+  stored.trash ?? (stored.done ?? []).map(title => ({ title, detail: '', by: 'user', at: stored.updatedAt }))
+
+// Each source keeps its own newest MAX_TRASH entries.
+function capTrash(entries: readonly TrashEntry[]): TrashEntry[] {
+  const newest = (by: TrashEntry['by']) => entries.filter(one => one.by === by).slice(-MAX_TRASH)
+  const kept = new Set([...newest('user'), ...newest('model')])
+  return entries.filter(one => kept.has(one))
+}
 
 // A saved list lives as long as Claude Code keeps the session's transcript,
 // since a session it has deleted cannot be resumed. Null for an invalid
@@ -186,12 +224,10 @@ function enqueue<T>(job: () => Promise<T>): Promise<T> {
 }
 
 async function persist($: EngineInterface) {
-  const key = STORE_PREFIX + (await $.session.id())
-  const state: TodoListState = {
-    items: await read($, items),
-    done: await read($, done),
-  }
-  if (state.items.length === 0 && state.done.length === 0) {
+  const [id, list, entries] = await Promise.all([$.session.id(), read($, items), read($, trash)])
+  const key = STORE_PREFIX + id
+  const state: TodoListState = { items: list, trash: entries }
+  if (state.items.length === 0 && state.trash.length === 0) {
     await $.store.delete(key)
     return
   }
@@ -203,10 +239,23 @@ async function commit($: EngineInterface, next: TodoItem[]) {
   await persist($)
 }
 
+// A new entry replaces an older one with the same title.
+async function record($: EngineInterface, removed: readonly TodoItem[], by: TrashEntry['by']) {
+  if (removed.length === 0) {
+    return
+  }
+  const at = await $.clock.now()
+  const titles = new Set(removed.map(one => one.title))
+  await update($, trash, list =>
+    capTrash([...list.filter(one => !titles.has(one.title)), ...removed.map(one => ({ ...one, by, at }))]),
+  )
+}
+
 async function tick($: EngineInterface, titles: readonly string[]) {
   const ticked = new Set(titles)
-  await update($, items, list => list.filter(one => !ticked.has(one.title)))
-  await update($, done, list => [...list.filter(one => !ticked.has(one)), ...titles].slice(-MAX_DONE))
+  const list = await read($, items)
+  await update($, items, current => current.filter(one => !ticked.has(one.title)))
+  await record($, pickedFrom(list, titles), 'user')
   await persist($)
 }
 
@@ -214,6 +263,15 @@ async function tick($: EngineInterface, titles: readonly string[]) {
 // one column.
 const labelWidth = (last: number) => `${last}.`.length + 1
 const numberLabel = (number: number, width: number) => `${number}.`.padEnd(width)
+
+// Numbered titles, each with its detail lined up under it.
+function numberedLines<T extends TodoItem>(list: readonly T[], title: (one: T) => string = one => one.title): string[] {
+  const width = labelWidth(list.length)
+  return list.flatMap((one, i) => {
+    const line = `${numberLabel(i + 1, width)}${title(one)}`
+    return one.detail === '' ? [line] : [line, prefixLines(one.detail, ' '.repeat(width))]
+  })
+}
 
 // The detail lines up under the title.
 function quoteBlock(item: TodoItem, number: number, width: number): string {
@@ -361,41 +419,90 @@ async function deleteFocused($: EngineInterface) {
   await update($, detailed, shown => (shown === '' ? '' : title))
 }
 
-// Resolves to the new list, or null when the list was left as it was.
+// Resolves to the new list, or null when the list was left as it was. `sent`
+// is the list the model was asked about: an item that reached the list after
+// that, by a restore, was never judged, so it stays.
 async function applyList(
   $: EngineInterface,
   parsed: TodoItem[] | null,
   gen: number,
+  sent: readonly TodoItem[],
 ): Promise<TodoItem[] | null> {
   if (parsed === null || gen !== generation) {
     return null
   }
-  // Ticks made while the model was thinking win over its reply.
-  const ticked = new Set(await read($, done))
-  const next = parsed.filter(one => !ticked.has(one.title))
+  const [current, entries] = await Promise.all([read($, items), read($, trash)])
+  // Deletes made while the model was thinking win over its reply.
+  const blocked = new Set(removedTitles(entries).user)
+  const sentTitles = new Set(sent.map(one => one.title))
+  const unjudged = current.filter(one => !sentTitles.has(one.title))
+  const next = cleanItems([...parsed.filter(one => !blocked.has(one.title)), ...unjudged])
   // Most turns change nothing; writing anyway would redraw the band and rewrite the store.
-  if (JSON.stringify(next) !== JSON.stringify(await read($, items))) {
+  if (JSON.stringify(next) !== JSON.stringify(current)) {
+    const kept = new Set(next.map(one => one.title))
+    await record($, current.filter(one => !kept.has(one.title) && !blocked.has(one.title)), 'model')
     await commit($, next)
   }
   return next
 }
 
-async function incremental($: EngineInterface, turn: PendingTurn, gen: number) {
+async function ask(
+  $: EngineInterface,
+  gen: number,
+  request: {
+    system: string
+    maxTokens: number
+    prompt: (sent: readonly TodoItem[], removed: RemovedTitles) => string
+    apply: (text: string, sent: readonly TodoItem[]) => TodoItem[] | null
+  },
+) {
   try {
-    const sent = await read($, items)
+    const [sent, entries] = await Promise.all([read($, items), read($, trash)])
     const reply = await $.model.complete({
       model: MODEL,
       effort: 'medium',
-      system: SYSTEM,
-      prompt: incrementalPrompt({ ...turn, items: sent, done: await read($, done) }),
-      maxTokens: 8192,
+      system: request.system,
+      prompt: request.prompt(sent, removedTitles(entries)),
+      maxTokens: request.maxTokens,
       timeoutMs: COMPLETE_TIMEOUT_MS,
     })
     if (reply.isAnswered) {
-      await applyList($, applyChanges(reply.text, sent), gen)
+      await applyList($, request.apply(reply.text, sent), gen, sent)
     }
   } catch {
     // Keep the previous list.
+  }
+}
+
+const incremental = ($: EngineInterface, turn: PendingTurn, gen: number) =>
+  ask($, gen, {
+    system: SYSTEM,
+    maxTokens: 8192,
+    prompt: (sent, removed) => incrementalPrompt({ ...turn, items: sent, removed }),
+    apply: applyChanges,
+  })
+
+const reviewList = ($: EngineInterface, turns: readonly ReviewTurn[], gen: number) =>
+  ask($, gen, {
+    system: REVIEW_SYSTEM,
+    maxTokens: 2048,
+    prompt: (sent, removed) => reviewPrompt({ items: sent, removed, turns }),
+    apply: applyReview,
+  })
+
+// Counts a tried turn and runs a review when one is due. The window empties
+// when a review is due, whatever its outcome, so a review that keeps failing
+// does not retry on every turn.
+async function countForReview($: EngineInterface, turn: PendingTurn, gen: number) {
+  if (gen !== generation) {
+    return
+  }
+  const [counted, { length }] = await Promise.all([read($, review), read($, items)])
+  const turns = [...counted, { userText: turn.userText, answer: turn.answer }]
+  const isDue = turns.length >= REVIEW_TURNS || (turns.length >= REVIEW_MIN_TURNS && length >= REVIEW_MIN_ITEMS)
+  await update($, review, () => (isDue ? [] : turns))
+  if (isDue && length > 0) {
+    await reviewList($, turns, gen)
   }
 }
 
@@ -409,6 +516,7 @@ async function runPending($: EngineInterface, gen: number) {
     }
     await incremental($, turn, gen)
     await update($, pending, turns => turns.slice(1))
+    await countForReview($, turn, gen)
   }
 }
 
@@ -435,19 +543,55 @@ function helpLine(isFocused: boolean, isArmed: boolean, isDetailed: boolean, sel
 
 const itemCount = (n: number) => `${n} ${n === 1 ? 'item' : 'items'}`
 
+const refreshFailed = (reason: string) => `Refresh failed (${reason}); the list is unchanged.`
+
+// Applies a refresh reply and reports the outcome, with `note` after a success.
+async function settleRefresh(
+  $: EngineInterface,
+  gen: number,
+  sent: readonly TodoItem[],
+  reply: { isAnswered: true; text: string } | { isAnswered: false; reason: string },
+  note = '',
+): Promise<string> {
+  if (!reply.isAnswered) {
+    return refreshFailed(reply.reason)
+  }
+  const next = await applyList($, applyRefresh(reply.text, sent), gen, sent)
+  return next === null ? refreshFailed('unparseable reply') : `Refreshed the list: ${itemCount(next.length)}.${note}`
+}
+
+// The main conversation has nothing to fork right after a resume.
+async function refreshFromTranscript(
+  $: EngineInterface,
+  gen: number,
+  sent: readonly TodoItem[],
+  removed: RemovedTitles,
+): Promise<string> {
+  const transcript = renderTranscript(await $.session.messages())
+  if (transcript === '') {
+    return 'Refresh failed: the main conversation has no messages yet, so there is nothing to refresh from. Send a message and try again.'
+  }
+  const [model] = await Promise.all([$.session.model(), update($, review, () => [])])
+  const reply = await $.model.complete({
+    model,
+    effort: 'medium',
+    prompt: refreshPrompt({ items: sent, removed, transcript }),
+    maxTokens: 8192,
+    timeoutMs: TRANSCRIPT_TIMEOUT_MS,
+  })
+  return settleRefresh($, gen, sent, reply, ' It was rebuilt from the transcript without the prompt cache.')
+}
+
 async function refresh($: EngineInterface, gen: number): Promise<string> {
   try {
-    const reply = await $.model.fork({ prompt: refreshPrompt(await read($, done)) })
+    const [sent, entries] = await Promise.all([read($, items), read($, trash)])
+    const removed = removedTitles(entries)
+    const reply = await $.model.fork({ prompt: refreshPrompt({ items: sent, removed }) })
     if (!reply.isAnswered && reply.reason === 'nothing-to-fork') {
-      return 'Refresh failed: the main conversation has not answered since startup or /clear, so there is nothing to fork. Send a message and try again.'
+      return await refreshFromTranscript($, gen, sent, removed)
     }
-    if (!reply.isAnswered) {
-      return `Refresh failed (${reply.reason}); the list is unchanged.`
-    }
-    const next = await applyList($, parseItems(reply.text), gen)
-    return next === null
-      ? 'Refresh failed (unparseable reply); the list is unchanged.'
-      : `Refreshed the list: ${itemCount(next.length)}.`
+    await update($, review, () => [])
+    return await settleRefresh($, gen, sent, reply)
   } catch {
     return 'Refresh failed; the list is unchanged.'
   }
@@ -457,8 +601,9 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'todos',
-      description: 'Show, refresh or clear the open items list, delete some, or send them all with a prompt',
-      argumentHint: '[refresh|clear|delete <numbers>|<prompt>]',
+      description:
+        'Show, refresh, clear or reset the open items list, delete some, list, restore or purge removed items, or send them all with a prompt',
+      argumentHint: '[refresh|clear|reset|trash|restore <numbers>|purge <numbers>|delete <numbers>|<prompt>]',
     })
 
     const now = await $.clock.now()
@@ -482,7 +627,7 @@ export const register: Register = on => {
     const mine = await $.store.get(STORE_PREFIX + (await $.session.id()))
     if (isStored(mine)) {
       await update($, items, () => migrate(mine.items))
-      await update($, done, () => mine.done)
+      await update($, trash, () => loadTrash(mine))
     }
 
     return next(e)
@@ -495,7 +640,8 @@ export const register: Register = on => {
       await update($, lastAnswer, () => '')
       await update($, pending, () => [])
       await update($, items, () => [])
-      await update($, done, () => [])
+      await update($, trash, () => [])
+      await update($, review, () => [])
       await update($, detailed, () => '')
       await update($, deleting, () => '')
       await update($, selected, () => [])
@@ -546,15 +692,84 @@ export const register: Register = on => {
       return { text: await enqueue(() => refresh($, gen)) }
     }
     if (arg === 'clear') {
-      await enqueue(() => commit($, []))
+      await enqueue(async () => tick($, (await read($, items)).map(one => one.title)))
       return { text: 'Cleared the list.' }
     }
+    // Any argument led by one of these words is that subcommand, so a mistyped
+    // one is refused instead of going out as a prompt.
+    const sub = /^(reset|trash|restore|purge|delete)(?:\s+|$)(.*)$/s.exec(arg)
+    if (sub?.[1] === 'reset') {
+      if (sub[2] !== '') {
+        return { text: 'Usage: /todos reset, with nothing after it. Nothing was changed.' }
+      }
+      await enqueue(async () => {
+        await update($, trash, () => [])
+        await update($, review, () => [])
+        await commit($, [])
+      })
+      return { text: 'Emptied the list and the trash.' }
+    }
+    // Numbered newest first, so `restore 1` takes back the latest removal.
+    const newestFirst = async () => [...(await read($, trash))].reverse()
+    if (sub?.[1] === 'trash') {
+      const removed = await newestFirst()
+      if (sub[2] !== '') {
+        return { text: 'Usage: /todos trash, with nothing after it.' }
+      }
+      if (removed.length === 0) {
+        return { text: 'The trash is empty.' }
+      }
+      return { text: ['Trash', ...numberedLines(removed, one => `${one.title} [${one.by}]`)].join('\n') }
+    }
+    // The trash entries `numbers` picks as `/todos trash` numbers them, or the
+    // reply refusing the pick.
+    const pickTrash = async (numbers: string, verb: 'restore' | 'purge') => {
+      const removed = await newestFirst()
+      const parsed = parseNumbers(numbers, removed.length)
+      if (parsed === null) {
+        return { text: `Usage: /todos ${verb} <numbers>, such as 2, 1-3, or 1,4 6. Nothing was ${verb}d.` }
+      }
+      if ('missing' in parsed) {
+        return { text: `No trash entry ${parsed.missing}. Nothing was ${verb}d.` }
+      }
+      return {
+        picked: parsed.numbers.flatMap(number => {
+          const entry = removed[number - 1]
+          return entry === undefined ? [] : [{ number, entry }]
+        }),
+      }
+    }
+    if (sub?.[1] === 'purge') {
+      const pick = await pickTrash(sub[2] ?? '', 'purge')
+      if ('text' in pick) {
+        return pick
+      }
+      const gone = new Set(pick.picked.map(one => one.entry.title))
+      await update($, trash, entries => entries.filter(one => !gone.has(one.title)))
+      await persist($)
+      const lines = pick.picked.map(({ number, entry }) => `${number}. ${entry.title}`)
+      return { text: [`Purged ${itemCount(pick.picked.length)}:`, ...lines].join('\n') }
+    }
+    if (sub?.[1] === 'restore') {
+      const pick = await pickTrash(sub[2] ?? '', 'restore')
+      if ('text' in pick) {
+        return pick
+      }
+      const { picked } = pick
+      const current = await read($, items)
+      const listed = new Set(current.map(one => one.title))
+      const gone = new Set(picked.map(one => one.entry.title))
+      const fresh = picked.filter(one => !listed.has(one.entry.title))
+      await update($, trash, entries => entries.filter(one => !gone.has(one.title)))
+      await commit($, cleanItems([...current, ...picked.map(one => one.entry)]))
+      const lines = picked.map(
+        ({ number, entry }) => `${number}. ${entry.title}${listed.has(entry.title) ? ' (already on the list)' : ''}`,
+      )
+      return { text: [`Restored ${itemCount(fresh.length)}:`, ...lines].join('\n') }
+    }
     const list = await read($, items)
-    // Any argument led by the word delete is a delete, so a mistyped number
-    // list is refused instead of going out as a prompt.
-    const deleteMatch = /^delete(?:\s+|$)(.*)$/s.exec(arg)
-    if (deleteMatch !== null) {
-      const parsed = parseNumbers(deleteMatch[1] ?? '', list.length)
+    if (sub?.[1] === 'delete') {
+      const parsed = parseNumbers(sub[2] ?? '', list.length)
       if (parsed === null) {
         return { text: 'Usage: /todos delete <numbers>, such as 2, 1-3, or 1,4 6. Nothing was removed.' }
       }
@@ -583,12 +798,7 @@ export const register: Register = on => {
     if (list.length === 0) {
       return { text: 'No open items.' }
     }
-    const width = labelWidth(list.length)
-    const lines = list.flatMap((one, i) => {
-      const title = `${numberLabel(i + 1, width)}${one.title}`
-      return one.detail === '' ? [title] : [title, prefixLines(one.detail, ' '.repeat(width))]
-    })
-    return { text: ['Todos', ...lines].join('\n') }
+    return { text: ['Todos', ...numberedLines(list)].join('\n') }
   })
 
   on('ui.focus', { component: 'AbovePrompt' }, async ($, e, next) => {

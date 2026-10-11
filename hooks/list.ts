@@ -1,11 +1,20 @@
-import type { TodoItem } from '../types'
+import type { SessionMessage } from 'claude-code'
+
+import type { ReviewTurn, TodoItem, TrashEntry } from '../types'
 
 const MAX_ITEMS = 99
-export const MAX_DONE = MAX_ITEMS
+export const MAX_TRASH = MAX_ITEMS
 const MAX_ITEM_LENGTH = 80
 export const MAX_DETAIL_LENGTH = 1000
 // A guard against pasted logs, far above any normal turn.
 const MAX_TEXT = 100_000
+// A review carries up to REVIEW_TURNS turns, so each is held to a smaller share.
+const REVIEW_TURN_TEXT = 20_000
+export const REVIEW_TURNS = 8
+export const REVIEW_MIN_TURNS = 3
+export const REVIEW_MIN_ITEMS = 6
+export const TRANSCRIPT_TOOL_RESULT_TEXT = 2_000
+export const TRANSCRIPT_TEXT = 200_000
 
 const DEFINITION = `An open item is something still pending in this conversation:
 - Work the user or the agent deferred (for example "later", "not now", "先不做", "之後再處理", "next step").
@@ -23,26 +32,42 @@ const ITEM_STYLE = `Write each item as an object with a "title" and a "detail", 
 - "title": one short line (at most ${MAX_ITEM_LENGTH} characters). Use half-width parentheses with a space before the opening one. End a title that carries a status, such as awaiting the user's reply or not yet tested, with that status in parentheses, written in the title's language, and nothing after it, as in "<what to do> (<status>)".
 - "detail": what to do, why it matters, and which part of the discussion it came from (at most ${MAX_DETAIL_LENGTH} characters, newlines included), so a reader who lost the conversation can act on it. Do not repeat the title. Put each distinct point on its own line, separated by a newline in the JSON string, as plain text with no Markdown bullets or headings.`
 
-const LIST_FORMAT = `Reply with the complete list as a JSON array of {"title", "detail"} objects and nothing else: no code fence, no commentary, for example [{"title":"<title>","detail":"<detail>"}]. Reply with [] when nothing is open.
-${ITEM_STYLE}`
-
 const RESOLVE = `For every current item, decide whether this turn resolves it. Remove it when the turn answers it, decides it, completes it, or makes it moot, even when the turn does not name it. A user's reply to a question, or a choice among offered options, resolves that question. Keep an item only when it is still open after this turn.`
 
 const CHANGE_FORMAT = `Reply with a JSON object and nothing else: no code fence, no commentary. "remove" lists the numbers of the current items this turn resolves, and "add" lists the new open items as {"title", "detail"} objects, for example {"remove":[2],"add":[{"title":"<title>","detail":"<detail>"}]}. Reply with {"remove":[],"add":[]} when nothing changed.
 ${ITEM_STYLE}`
 
+const REVIEW_RESOLVE = `For every current item, decide whether it is still open at the end of the turns below. Remove it when a later turn answered it, decided it, completed it, dropped it, or made it moot, even when no turn names it, and keep it only when the end of the turns still leaves it open.`
+
+const REVIEW_FORMAT = `Reply with a JSON object and nothing else: no code fence, no commentary. "remove" lists the numbers of the current items that are no longer open, for example {"remove":[2]}. Reply with {"remove":[]} when every item is still open. Do not add items.`
+
+const REFRESH_FORMAT = `Reply with a JSON object and nothing else: no code fence, no commentary. "remove" lists the numbers of the current items that are no longer open, "add" lists open items the list is missing as {"title", "detail"} objects, and "update" lists {"number", "detail"} objects for kept items whose detail is out of date or empty, for example {"remove":[2],"add":[{"title":"<title>","detail":"<detail>"}],"update":[{"number":1,"detail":"<detail>"}]}. An update changes only the detail; a kept item keeps its title. Reply with {"remove":[],"add":[],"update":[]} when nothing changed.
+${ITEM_STYLE}`
+
 export const SYSTEM = `You maintain a to-do list of open items for a coding conversation.\n\n${DEFINITION}\n\n${RESOLVE}\n\n${CHANGE_FORMAT}`
 
-const HEAD_TEXT = 25_000
+export const REVIEW_SYSTEM = `You review a to-do list of open items for a coding conversation. You only remove items that are no longer open.\n\n${DEFINITION}\n\n${REVIEW_RESOLVE}\n\n${REVIEW_FORMAT}`
 
 // Keeps the tail, where an answer usually ends with the question it leaves open.
-const clip = (text: string) =>
-  text.length > MAX_TEXT
-    ? `${text.slice(0, HEAD_TEXT)}\n[truncated]\n${text.slice(HEAD_TEXT - MAX_TEXT)}`
+const clip = (text: string, max = MAX_TEXT) =>
+  text.length > max
+    ? `${text.slice(0, max / 4)}\n[truncated]\n${text.slice(max / 4 - max)}`
     : text
 
-const removedBlock = (done: readonly string[]) =>
-  `Items the user removed (never add them back):\n${done.length === 0 ? '(none)' : JSON.stringify(done)}`
+export type RemovedTitles = { user: readonly string[]; model: readonly string[] }
+
+export const removedTitles = (entries: readonly TrashEntry[]): RemovedTitles => ({
+  user: entries.filter(one => one.by === 'user').map(one => one.title),
+  model: entries.filter(one => one.by === 'model').map(one => one.title),
+})
+
+const titlesOf = (titles: readonly string[]) => (titles.length === 0 ? '(none)' : JSON.stringify(titles))
+
+const removedBlocks = (removed: RemovedTitles) =>
+  [
+    `Items the user removed (never add them back):\n${titlesOf(removed.user)}`,
+    `Items removed earlier because they were no longer open (do not add them back unless the conversation reopens them):\n${titlesOf(removed.model)}`,
+  ].join('\n\n')
 
 // Prefixes every line of a multi-line text, such as an item's detail.
 export const prefixLines = (text: string, prefix: string) =>
@@ -60,14 +85,14 @@ const numbered = (items: readonly TodoItem[]) =>
 
 export function incrementalPrompt(input: {
   items: readonly TodoItem[]
-  done: readonly string[]
+  removed: RemovedTitles
   previousAnswer: string
   userText: string
   answer: string
 }): string {
   return [
     `Current list:\n${numbered(input.items)}`,
-    removedBlock(input.done),
+    removedBlocks(input.removed),
     `Agent final answer of the previous turn, which this turn's user message may reply to:\n${clip(input.previousAnswer) || '(none)'}`,
     `User message of this turn:\n${clip(input.userText) || '(none)'}`,
     `Agent final answer of this turn:\n${clip(input.answer) || '(none)'}`,
@@ -75,12 +100,79 @@ export function incrementalPrompt(input: {
   ].join('\n\n')
 }
 
-export function refreshPrompt(done: readonly string[]): string {
+export function reviewPrompt(input: {
+  items: readonly TodoItem[]
+  removed: RemovedTitles
+  turns: readonly ReviewTurn[]
+}): string {
+  const turns = input.turns.map(
+    (one, i) =>
+      `Turn ${i + 1} of ${input.turns.length}\nUser message:\n${clip(one.userText, REVIEW_TURN_TEXT) || '(none)'}\nAgent final answer:\n${clip(one.answer, REVIEW_TURN_TEXT) || '(none)'}`,
+  )
   return [
-    'This request comes from the todo-list plugin, not from the user. Do not continue the conversation or call tools; answer only this request. Rebuild the to-do list of open items from the whole conversation above.',
+    `Current list:\n${numbered(input.items)}`,
+    removedBlocks(input.removed),
+    ...turns,
+    'Return the removals.',
+  ].join('\n\n')
+}
+
+const BLOCK_SEPARATOR = '\n\n'
+
+// A user message that only carries tool results renders to nothing, since the
+// results already sit under the calls that made them.
+const renderMessage = (message: SessionMessage) =>
+  [
+    message.text === '' ? '' : `[${message.role}]\n${message.text}`,
+    ...message.toolUses.map(
+      use => `[tool ${use.tool}]\n${clip(use.text ?? '', TRANSCRIPT_TOOL_RESULT_TEXT) || '(no result)'}`,
+    ),
+  ]
+    .filter(block => block !== '')
+    .join(BLOCK_SEPARATOR)
+
+// Renders the newest messages that fit TRANSCRIPT_TEXT, dropping whole oldest
+// messages first; a lone newest message past the limit is clipped instead.
+export function renderTranscript(messages: readonly SessionMessage[]): string {
+  const kept: string[] = []
+  let length = 0
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const block = renderMessage(messages[i] as SessionMessage)
+    if (block === '') {
+      continue
+    }
+    const next = length + block.length + (kept.length === 0 ? 0 : BLOCK_SEPARATOR.length)
+    if (next > TRANSCRIPT_TEXT && kept.length > 0) {
+      break
+    }
+    kept.push(clip(block, TRANSCRIPT_TEXT))
+    length = next
+  }
+  return kept.reverse().join(BLOCK_SEPARATOR)
+}
+
+// Without a transcript, the prompt refers to the conversation already in context.
+export function refreshPrompt({
+  items,
+  removed,
+  transcript,
+}: {
+  items: readonly TodoItem[]
+  removed: RemovedTitles
+  transcript?: string
+}): string {
+  const [head, source] =
+    transcript === undefined
+      ? [[], 'the whole conversation above']
+      : [[`Transcript of the conversation:\n\n${transcript}`], 'the transcript above']
+  return [
+    ...head,
+    `This request comes from the todo-list plugin, not from the user. Do not continue the conversation or call tools; answer only this request. Review the current to-do list against ${source}.`,
     DEFINITION,
-    removedBlock(done),
-    LIST_FORMAT,
+    `Current list:\n${numbered(items)}`,
+    removedBlocks(removed),
+    'Judge each current item from where the conversation ended, and keep it only when the conversation shows it is still open. Also add open items the list is missing.',
+    REFRESH_FORMAT,
   ].join('\n\n')
 }
 
@@ -113,7 +205,7 @@ const tidyDetail = (text: string) =>
     .trimEnd()
 
 // Normalizes, trims, deduplicates by title and caps a list of items.
-function cleanItems(items: readonly TodoItem[]): TodoItem[] {
+export function cleanItems(items: readonly TodoItem[]): TodoItem[] {
   const seen = new Set<string>()
   const kept: TodoItem[] = []
   for (const one of items) {
@@ -146,12 +238,6 @@ export const isItem = (value: unknown): value is TodoItem =>
   typeof (value as TodoItem).detail === 'string'
 
 const isItems = (value: unknown): value is TodoItem[] => Array.isArray(value) && value.every(isItem)
-
-// Returns null when the reply is not a JSON array of {title, detail} objects.
-export function parseItems(text: string): TodoItem[] | null {
-  const parsed = parseJson(text, '[', ']')
-  return isItems(parsed) ? cleanItems(parsed) : null
-}
 
 // Resolves item numbers such as "2", "1-3" or "1,4 6" against a list of
 // `count` items. Returns the numbers ascending and distinct, the smallest
@@ -187,19 +273,59 @@ export function parseNumbers(
   return missing === Infinity ? { numbers: [...numbers].sort((a, b) => a - b) } : { missing }
 }
 
-// Applies a {"remove": [...], "add": [...]} reply to the list it was asked
-// about; returns null when the reply has another shape or names no such item.
-export function applyChanges(text: string, items: readonly TodoItem[]): TodoItem[] | null {
-  const parsed = parseJson(text, '{', '}') as { remove?: unknown; add?: unknown } | undefined
+const isNumberIn = (n: unknown, count: number): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= count
+
+// The reply's "remove" applied to the `items` it was asked about: the numbers it
+// names and the items it leaves, with the reply's raw "add" and "update". Null
+// when "remove" is not a list of numbers within `items`.
+function parseRemove(text: string, items: readonly TodoItem[]) {
+  const parsed = parseJson(text, '{', '}') as Record<string, unknown> | undefined
   const remove = parsed?.remove
-  const add = parsed?.add
-  if (
-    !Array.isArray(remove) ||
-    !remove.every(n => Number.isInteger(n) && n >= 1 && n <= items.length) ||
-    !isItems(add)
-  ) {
+  if (parsed === undefined || !Array.isArray(remove) || !remove.every(n => isNumberIn(n, items.length))) {
     return null
   }
   const gone = new Set(remove as number[])
-  return cleanItems([...items.filter((_, i) => !gone.has(i + 1)), ...add])
+  return { gone, kept: items.filter((_, i) => !gone.has(i + 1)), add: parsed.add, update: parsed.update }
+}
+
+// Applies a {"remove": [...], "add": [...]} reply to the list it was asked
+// about; returns null when the reply has another shape or names no such item.
+export function applyChanges(text: string, items: readonly TodoItem[]): TodoItem[] | null {
+  const change = parseRemove(text, items)
+  const add = change?.add
+  if (change === null || !isItems(add)) {
+    return null
+  }
+  return cleanItems([...change.kept, ...add])
+}
+
+// Applies a {"remove": [...]} reply; any "add" in it is ignored.
+export function applyReview(text: string, items: readonly TodoItem[]): TodoItem[] | null {
+  const change = parseRemove(text, items)
+  return change === null ? null : change.kept
+}
+
+// Applies a {"remove": [...], "add": [...], "update": [{number, detail}]} reply.
+// An update takes the new detail and keeps the title. The reply fails when an
+// update names no such item, an item twice, or a removed item, or leaves the
+// detail empty.
+export function applyRefresh(text: string, items: readonly TodoItem[]): TodoItem[] | null {
+  const change = parseRemove(text, items)
+  const add = change?.add
+  const updates = change?.update ?? []
+  if (change === null || !isItems(add) || !Array.isArray(updates)) {
+    return null
+  }
+  const details = new Map<number, string>()
+  for (const one of updates as { number?: unknown; detail?: unknown }[]) {
+    const detail = typeof one?.detail === 'string' ? tidyDetail(one.detail) : ''
+    if (!isNumberIn(one?.number, items.length) || change.gone.has(one.number) || details.has(one.number) || detail === '') {
+      return null
+    }
+    details.set(one.number, detail)
+  }
+  const kept = items.flatMap((one, i) =>
+    change.gone.has(i + 1) ? [] : [{ title: one.title, detail: details.get(i + 1) ?? one.detail }],
+  )
+  return cleanItems([...kept, ...add])
 }

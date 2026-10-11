@@ -15,10 +15,11 @@
 - 每次主迴圈的 turn 以回答結束後，mod 會把這個 turn 送給 Sonnet (用的是 `sonnet` alias，實際模型跟著安裝的 Claude Code 版本走)，問它這個 turn 解決了清單上的哪些事項、又多出哪些新的事項。Subagent 的 turn 不算在內。
 - 待辦事項指的是有人說要延後的工作、agent 答應要做的後續工作或檢查，以及還沒有結論的問題或決定。正在執行的這一步、同一個 turn 內就完成的事，以及已經列在 OpenSpec `tasks.md` 裡的任務，都不會列入。
 - 每個事項有一行標題和一段簡短說明，語言跟 agent 回答時用的語言相同。
-- 清單按 session 分開保存，恢復 session 時會一起還原。清單超過 `cleanupPeriodDays` 設定的天數沒更新就會被刪除，這個設定也決定 Claude Code 保留 transcript 的天數，預設 30 天。`/clear` 會清空清單。
-- 刪除過的事項會被記住，模型不會再把它加回來。
+- 清單按 session 分開保存，恢復 session 時會一起還原。清單超過 `cleanupPeriodDays` 設定的天數沒更新就會被刪除，這個設定也決定 Claude Code 保留 transcript 的天數，預設 30 天。`/clear` 會清空清單和垃圾桶。
+- 每個離開清單的事項都會進垃圾桶，記下標題、說明、是誰移除的 (你或模型) 和移除時間。每種來源各保留最新的 99 筆。你刪除的事項不會再被加回來；模型移除的事項除非對話重新提起，否則也不會再被加回來。
+- 有些事項是被後來的 turn 蓋過才失效，沒有哪一個 turn 會明確移除它，所以 mod 還會回頭檢查最近的 turn：累計 8 個有回答的 turn，或清單有 6 個以上事項且累計 3 個 turn 時執行。檢查只會移除已經不再待辦的事項，不會新增。被移除的事項可以用 `/todos restore` 放回清單。
 
-每個有回答的 turn 會多一次 Sonnet 呼叫。`/todos refresh` 會 fork 主對話，所以是用主模型帶著完整 context 執行。
+每個有回答的 turn 會多一次 Sonnet 呼叫；每次檢查也是一次 Sonnet 呼叫，最多每 3 個 turn 一次。`/todos refresh` 會 fork 主對話，所以是用主模型帶著完整 context 執行。它會根據整段對話逐項檢查清單上的事項：移除已經不再待辦的、補上漏掉的，也可能改寫保留事項的說明，但保留的事項標題不變。剛 resume 之後還沒有可以 fork 的對話，這時改用 transcript 重建清單，仍然是用主模型，但沒有 prompt cache，所以花費較高。transcript 只取最新的 200,000 個字元，每則工具結果最多保留 2,000 個字元。
 
 ## 需求
 
@@ -40,8 +41,12 @@ claude plugin install todo-list@claude-todo-list
 | 指令 | 作用 |
 | --- | --- |
 | `/todos` | 列出待辦事項和說明 |
-| `/todos refresh` | 根據整段對話重建清單 |
-| `/todos clear` | 清空清單 |
+| `/todos refresh` | 根據整段對話逐項檢查：移除不再待辦的事項、補上漏掉的、更新說明 |
+| `/todos clear` | 刪除所有事項，這些事項會記為你刪除的，放進垃圾桶 |
+| `/todos reset` | 清空清單和垃圾桶，所有「不再加回來」的限制也一併解除 |
+| `/todos trash` | 由新到舊列出被移除的事項、說明和移除者 |
+| `/todos restore <編號>` | 把垃圾桶裡的事項放回清單，編號照 `/todos trash` 顯示的為準，寫法和 `delete` 的編號相同。只要有一個編號超出垃圾桶範圍，整次還原就會取消 |
+| `/todos purge <編號>` | 把垃圾桶裡的事項永久刪除，編號照 `/todos trash` 顯示的為準。永久刪除你刪過的事項後，模型就可以再把它加回來 |
 | `/todos delete <編號>` | 依編號刪除事項，例如 `2`、`1-3` 或 `1,4 6`。只要有一個編號超出清單範圍，整次刪除就會取消 |
 | `/todos <prompt>` | 把所有事項加上編號、以引用的形式放在 prompt 前面一起送出，prompt 裡就能寫「做 1 和 2，跳過 3」這類指示 |
 

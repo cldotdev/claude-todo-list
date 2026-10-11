@@ -2,7 +2,16 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, EngineCall, MockClock, Mounted } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { MAX_DETAIL_LENGTH } from '../hooks/list'
+import type { TrashEntry } from '../types'
+import {
+  MAX_DETAIL_LENGTH,
+  MAX_TRASH,
+  REVIEW_MIN_ITEMS,
+  REVIEW_MIN_TURNS,
+  REVIEW_TURNS,
+  TRANSCRIPT_TEXT,
+  TRANSCRIPT_TOOL_RESULT_TEXT,
+} from '../hooks/list'
 
 const USAGE = { input_tokens: 1, output_tokens: 1 } as never
 const BAND = {
@@ -12,7 +21,17 @@ const BAND = {
   props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 80 } as never,
 } as const
 
-type Reply = { isAnswered: true; text: string } | { isAnswered: false; reason: string }
+type Reply = ({ isAnswered: true; text: string } | { isAnswered: false; reason: string }) & {
+  // Runs while the request waits for its reply.
+  during?: () => Promise<unknown>
+}
+
+// The next queued reply, or a failure once they run out.
+async function nextReply(replies: Reply[]) {
+  const { during, ...reply } = replies.shift() ?? { isAnswered: false, reason: 'empty-reply' }
+  await during?.()
+  return { value: { usage: USAGE, ...reply } as never }
+}
 
 function setup(
   on: On,
@@ -21,6 +40,7 @@ function setup(
   settings: Record<string, unknown> = {},
 ) {
   const asked: string[] = []
+  const models: string[] = []
   const filled: string[] = []
   const submitted: string[] = []
   const landed: (string | undefined)[] = []
@@ -56,12 +76,12 @@ function setup(
     return { isFilled: true, text: e.text, cursor: e.text.length }
   })
   on('command.register', () => ({ value: { command: 'todos' } }))
-  on('model.complete', (_$, e) => {
+  on('model.complete', async (_$, e) => {
     asked.push(e.prompt)
-    const reply = replies.shift() ?? { isAnswered: false, reason: 'empty-reply' }
-    return { value: { usage: USAGE, ...reply } as never }
+    models.push(e.model)
+    return nextReply(replies)
   })
-  return { asked, clock, filled, landed, ran, submitted, toasts }
+  return { asked, models, clock, filled, landed, ran, submitted, toasts }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -232,7 +252,7 @@ test('a reply with string items keeps the previous list', async ($, on) => {
 
 test('stored string items migrate to items without a detail', async ($, on) => {
   setup(on, [], {
-    'session:s1': { items: ['old', { title: 'new', detail: 'x' }], done: [], updatedAt: Date.now() },
+    'session:s1': { items: ['old', { title: 'new', detail: 'x' }], trash: [], updatedAt: Date.now() },
   })
   await start($)
   const listed = await $.command.run({ command: 'todos', args: '', origin, presentation })
@@ -243,7 +263,7 @@ const DAY_MS = 24 * 60 * 60 * 1000
 
 // Resumes a session whose list was last saved 40 days ago, and lists it.
 async function listAfter40Days($: Engine, on: On, settings: Record<string, unknown>) {
-  const saved = { items: [{ title: 'a', detail: '' }], done: [], updatedAt: 0 }
+  const saved = { items: [{ title: 'a', detail: '' }], trash: [], updatedAt: 0 }
   const { clock } = setup(on, [], { 'session:s1': saved }, settings)
   await clock.set(40 * DAY_MS)
   await start($)
@@ -639,4 +659,498 @@ test('numbers are padded so the titles under 1. and 11. start in one column', as
   const lines = await listed()
   expect(lines[0]).toBe('1.  a')
   expect(lines[20]).toBe('11. k')
+})
+
+const NOOP = '{"remove":[],"add":[]}'
+const answered = (text: string): Reply => ({ isAnswered: true, text })
+const adding = (...titles: string[]) =>
+  answered(JSON.stringify({ remove: [], add: titles.map(title => ({ title, detail: `d-${title}` })) }))
+const removing = (...numbers: number[]) => answered(JSON.stringify({ remove: numbers, add: [] }))
+
+const run = ($: Engine, args: string) =>
+  $.command.run({ command: 'todos', args, origin, presentation }).then(reply => reply.text)
+
+// Answers `/todos refresh` with the given replies, and records the prompts.
+function mockFork(on: On, replies: Reply[]) {
+  const forked: string[] = []
+  on('model.fork', (_$, e) => {
+    forked.push(e.prompt)
+    return nextReply(replies)
+  })
+  return forked
+}
+
+// Completes `count` answered turns, each with its own answer.
+async function turns($: Engine, clock: MockClock, count: number, from = 1) {
+  for (let i = from; i < from + count; i += 1) {
+    await turn($, clock, { answer: `answer-${i}` })
+  }
+}
+
+const SIX = ['a', 'b', 'c', 'd', 'e', 'f']
+const noops = (count: number) => Array.from({ length: count }, () => answered(NOOP))
+
+test(`${REVIEW_TURNS} turns on a short list trigger a review that sees every turn`, async ($, on) => {
+  const { asked, clock } = setup(on, [adding('a'), ...noops(REVIEW_TURNS - 1), removing(1)])
+  await start($)
+  await turns($, clock, REVIEW_TURNS - 1)
+  expect(asked).toHaveLength(REVIEW_TURNS - 1)
+  await turns($, clock, 1, REVIEW_TURNS)
+  expect(asked).toHaveLength(REVIEW_TURNS + 1)
+  for (let i = 1; i <= REVIEW_TURNS; i += 1) {
+    expect(asked.at(-1)).toContain(`Turn ${i} of ${REVIEW_TURNS}`)
+    expect(asked.at(-1)).toContain(`answer-${i}`)
+  }
+  expect(await run($, '')).toBe('No open items.')
+  expect(await run($, 'trash')).toBe('Trash\n1. a [model]\n   d-a')
+})
+
+test(`${REVIEW_MIN_TURNS} turns trigger a review once the list holds ${REVIEW_MIN_ITEMS} items`, async ($, on) => {
+  const { asked, clock } = setup(on, [adding(...SIX), ...noops(REVIEW_MIN_TURNS - 1), removing(2, 4)])
+  await start($)
+  await turns($, clock, REVIEW_MIN_TURNS - 1)
+  expect(asked).toHaveLength(REVIEW_MIN_TURNS - 1)
+  await turns($, clock, 1, REVIEW_MIN_TURNS)
+  expect(asked).toHaveLength(REVIEW_MIN_TURNS + 1)
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a\n2. c\n   d-c\n3. e\n   d-e\n4. f\n   d-f')
+  expect(await run($, 'trash')).toBe('Trash\n1. d [model]\n   d-d\n2. b [model]\n   d-b')
+})
+
+test('an empty list skips the review and the count starts again', async ($, on) => {
+  const { asked, clock } = setup(on, [
+    ...Array.from({ length: REVIEW_TURNS }, () => answered('not json')),
+    adding('a'),
+    ...noops(REVIEW_TURNS - 1),
+    removing(1),
+  ])
+  await start($)
+  await turns($, clock, REVIEW_TURNS)
+  expect(asked).toHaveLength(REVIEW_TURNS)
+  await turns($, clock, REVIEW_TURNS, REVIEW_TURNS + 1)
+  expect(asked).toHaveLength(REVIEW_TURNS * 2 + 1)
+  expect(asked.at(-1)).toContain(`Turn 1 of ${REVIEW_TURNS}`)
+})
+
+test('subagent and aborted turns are not counted toward a review', async ($, on) => {
+  const { asked, clock } = setup(on, [adding('a'), ...noops(REVIEW_TURNS - 2)])
+  await start($)
+  await turns($, clock, REVIEW_TURNS - 1)
+  await turn($, clock, { agentId: 'a1' })
+  await turn($, clock, { reason: 'aborted', isAborted: true })
+  expect(asked).toHaveLength(REVIEW_TURNS - 1)
+})
+
+test('refresh and /todos reset restart the review count', async ($, on) => {
+  const { asked, clock } = setup(on, [adding('a'), ...noops(REVIEW_TURNS * 2)])
+  const forked = mockFork(on, [answered(NOOP)])
+  await start($)
+  await turns($, clock, REVIEW_TURNS - 1)
+  expect(await run($, 'refresh')).toBe('Refreshed the list: 1 item.')
+  expect(forked).toHaveLength(1)
+  await turns($, clock, 1, REVIEW_TURNS)
+  expect(asked).toHaveLength(REVIEW_TURNS)
+
+  await turns($, clock, REVIEW_TURNS - 2, REVIEW_TURNS + 1)
+  expect(await run($, 'reset')).toBe('Emptied the list and the trash.')
+  await turns($, clock, 1, 2 * REVIEW_TURNS)
+  expect(asked).toHaveLength(REVIEW_TURNS * 2 - 1)
+})
+
+test('a malformed or out-of-range review reply keeps the list and the trash', async ($, on) => {
+  const { clock } = setup(on, [
+    adding('a', 'b'),
+    ...noops(REVIEW_TURNS - 1),
+    removing(3),
+    ...noops(REVIEW_TURNS - 1),
+    answered('not json'),
+  ])
+  await start($)
+  await turns($, clock, REVIEW_TURNS)
+  await turns($, clock, REVIEW_TURNS, REVIEW_TURNS + 1)
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a\n2. b\n   d-b')
+  expect(await run($, 'trash')).toBe('The trash is empty.')
+})
+
+test('a review cannot add items', async ($, on) => {
+  const { clock } = setup(on, [
+    adding('a'),
+    ...noops(REVIEW_TURNS - 1),
+    answered('{"remove":[],"add":[{"title":"z","detail":"d"}]}'),
+  ])
+  await start($)
+  await turns($, clock, REVIEW_TURNS)
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a')
+})
+
+test('a delete made while the review waits stays a user removal', async ($, on) => {
+  const { clock } = setup(on, [
+    adding('a', 'b'),
+    ...noops(REVIEW_TURNS - 1),
+    { ...removing(1), during: () => run($, 'delete 1') },
+  ])
+  await start($)
+  await turns($, clock, REVIEW_TURNS)
+  expect(await run($, '')).toBe('Todos\n1. b\n   d-b')
+  expect(await run($, 'trash')).toBe('Trash\n1. a [user]\n   d-a')
+})
+
+test('an item restored while the review waits stays on the list', async ($, on) => {
+  const { clock } = setup(on, [...noops(REVIEW_TURNS), { ...removing(1, 2), during: () => run($, 'restore 1') }], {
+    'session:s1': {
+      items: [{ title: 'a', detail: 'd-a' }, { title: 'b', detail: 'd-b' }],
+      trash: [entry('x', 'user')],
+      updatedAt: Date.now(),
+    },
+  })
+  await start($)
+  await turns($, clock, REVIEW_TURNS)
+  expect(await run($, '')).toBe('Todos\n1. x\n   d-x')
+  expect(await run($, 'trash')).toBe('Trash\n1. b [model]\n   d-b\n2. a [model]\n   d-a')
+})
+
+test('the prompts carry the titles the user removed and the model removed apart', async ($, on) => {
+  const { asked, clock } = setup(on, [adding('a', 'b', 'c'), removing(2), answered(NOOP)])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'delete 1')
+  await turn($, clock, {})
+  await turn($, clock, {})
+  expect(asked[2]).toContain('Items the user removed (never add them back):\n["a"]')
+  expect(asked[2]).toContain('do not add them back unless the conversation reopens them):\n["c"]')
+})
+
+test('a title the model removed can come back, and a later delete leaves one user entry', async ($, on) => {
+  const { clock } = setup(on, [adding('a'), removing(1), adding('a')])
+  await start($)
+  await turns($, clock, 2)
+  expect(await run($, 'trash')).toBe('Trash\n1. a [model]\n   d-a')
+  await turns($, clock, 1, 3)
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a')
+  await run($, 'delete 1')
+  expect(await run($, 'trash')).toBe('Trash\n1. a [user]\n   d-a')
+})
+
+const entry = (title: string, by: TrashEntry['by']) => ({ title, detail: `d-${title}`, by, at: 1 })
+
+test('each source keeps its own newest entries in the trash', async ($, on) => {
+  const old = Array.from({ length: MAX_TRASH }, (_, i) => entry(`m${i}`, 'model'))
+  const users = ['u0', 'u1', 'u2'].map(title => entry(title, 'user'))
+  const { clock } = setup(on, [removing(1)], {
+    'session:s1': { items: [{ title: 'x', detail: '' }], trash: [...users, ...old], updatedAt: Date.now() },
+  })
+  await start($)
+  await turn($, clock, {})
+  // Title lines only: every entry here but x carries a detail line.
+  const lines = ((await run($, 'trash')) ?? '').split('\n').filter(line => / \[(user|model)\]$/.test(line))
+  expect(lines).toHaveLength(MAX_TRASH + users.length)
+  expect(lines[0]).toContain('x [model]')
+  expect(lines).not.toContain(expect.stringContaining('m0 '))
+  expect(lines.filter(one => one.endsWith('[user]'))).toHaveLength(users.length)
+})
+
+test('a saved trash comes back on resume', async ($, on) => {
+  setup(on, [], {
+    'session:s1': { items: [], trash: [entry('a', 'user'), entry('b', 'model')], updatedAt: Date.now() },
+  })
+  await start($)
+  expect(await run($, 'trash')).toBe('Trash\n1. b [model]\n   d-b\n2. a [user]\n   d-a')
+})
+
+test('a legacy done list becomes user entries that keep their titles off the list', async ($, on) => {
+  const { clock } = setup(on, [adding('A')], { 'session:s1': { items: [], done: ['A'], updatedAt: Date.now() } })
+  await start($)
+  expect(await run($, 'trash')).toBe('Trash\n1. A [user]')
+  await turn($, clock, {})
+  expect(await run($, '')).toBe('No open items.')
+})
+
+test('a stored entry with neither trash nor done is not loaded', async ($, on) => {
+  setup(on, [], { 'session:s1': { items: [{ title: 'a', detail: '' }], updatedAt: Date.now() } })
+  await start($)
+  expect(await run($, '')).toBe('No open items.')
+})
+
+test('/todos clear moves every item to the trash as a user removal', async ($, on) => {
+  const { clock } = setup(on, [adding('a', 'b', 'c')])
+  await start($)
+  await turn($, clock, {})
+  expect(await run($, 'clear')).toBe('Cleared the list.')
+  expect(await run($, '')).toBe('No open items.')
+  expect(await run($, 'trash')).toBe('Trash\n1. c [user]\n   d-c\n2. b [user]\n   d-b\n3. a [user]\n   d-a')
+})
+
+test('/todos clear waits for a pending reply, which then lands in the trash as a user removal', async ($, on) => {
+  let cleared: Promise<string | undefined> | undefined
+  // Not awaited: the clear is queued behind this very reply.
+  const clear = async () => {
+    cleared = run($, 'clear')
+  }
+  const { clock } = setup(on, [{ ...adding('a'), during: clear }])
+  await start($)
+  await turn($, clock, {})
+  expect(await cleared).toBe('Cleared the list.')
+  expect(await run($, '')).toBe('No open items.')
+  expect(await run($, 'trash')).toBe('Trash\n1. a [user]\n   d-a')
+})
+
+test('/todos trash lists newest first, says when empty and refuses extra text', async ($, on) => {
+  const { clock, submitted } = setup(on, [adding('a', 'b'), removing(1)])
+  await start($)
+  expect(await run($, 'trash')).toBe('The trash is empty.')
+  await turn($, clock, {})
+  await run($, 'delete 1')
+  await turn($, clock, {})
+  expect(await run($, 'trash')).toBe('Trash\n1. b [model]\n   d-b\n2. a [user]\n   d-a')
+  expect(await run($, 'trash all')).toStartWith('Usage:')
+  await clock.advance(0)
+  expect(submitted).toEqual([])
+})
+
+test('/todos restore puts items back, lifts the user block and skips a title already listed', async ($, on) => {
+  const { clock } = setup(on, [adding('a', 'b'), adding('a', 'b'), adding('c')])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'delete 1-2')
+  expect(await run($, 'restore 2')).toBe('Restored 1 item:\n2. a')
+  expect(await run($, 'trash')).toBe('Trash\n1. b [user]\n   d-b')
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a')
+
+  await turn($, clock, {})
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a')
+  await run($, 'delete 1')
+  expect(await run($, 'restore 1-2')).toBe('Restored 2 items:\n1. a\n2. b')
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a\n2. b\n   d-b')
+
+  await run($, 'clear')
+  await run($, 'restore 1')
+  await turn($, clock, {})
+  expect(await run($, '')).toBe('Todos\n1. b\n   d-b\n2. c\n   d-c')
+})
+
+test('/todos restore counts only the items added and marks a title already listed', async ($, on) => {
+  const { clock } = setup(on, [adding('a', 'b'), removing(1), adding('a')])
+  await start($)
+  await turns($, clock, 3)
+  await run($, 'delete 1')
+  expect(await run($, 'trash')).toBe('Trash\n1. b [user]\n   d-b\n2. a [model]\n   d-a')
+  expect(await run($, 'restore 1-2')).toBe('Restored 1 item:\n1. b\n2. a (already on the list)')
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a\n2. b\n   d-b')
+  expect(await run($, 'trash')).toBe('The trash is empty.')
+})
+
+test('a malformed or out-of-range /todos restore changes nothing and sends nothing', async ($, on) => {
+  const { clock, submitted } = setup(on, [adding('a', 'b')])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'delete 1-2')
+  for (const args of ['restore', 'restore two', 'restore 2-1']) {
+    expect(await run($, args)).toStartWith('Usage:')
+  }
+  expect(await run($, 'restore 1,3')).toBe('No trash entry 3. Nothing was restored.')
+  await clock.advance(0)
+  expect(submitted).toEqual([])
+  expect(await run($, '')).toBe('No open items.')
+  expect(await run($, 'trash')).toBe('Trash\n1. b [user]\n   d-b\n2. a [user]\n   d-a')
+})
+
+test('/todos purge drops trash entries for good and lifts the user block', async ($, on) => {
+  const { clock } = setup(on, [adding('a', 'b'), adding('b')])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'delete 1-2')
+  expect(await run($, 'purge 1')).toBe('Purged 1 item:\n1. b')
+  expect(await run($, '')).toBe('No open items.')
+  expect(await run($, 'trash')).toBe('Trash\n1. a [user]\n   d-a')
+  await turn($, clock, {})
+  expect(await run($, '')).toBe('Todos\n1. b\n   d-b')
+})
+
+test('a malformed or out-of-range /todos purge changes nothing and sends nothing', async ($, on) => {
+  const { clock, submitted } = setup(on, [adding('a', 'b')])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'delete 1-2')
+  for (const args of ['purge', 'purge two', 'purge 2-1']) {
+    expect(await run($, args)).toStartWith('Usage:')
+  }
+  expect(await run($, 'purge 1,3')).toBe('No trash entry 3. Nothing was purged.')
+  await clock.advance(0)
+  expect(submitted).toEqual([])
+  expect(await run($, 'trash')).toBe('Trash\n1. b [user]\n   d-b\n2. a [user]\n   d-a')
+})
+
+test('/todos reset empties the list and the trash and lifts the blocks', async ($, on) => {
+  const { clock, submitted } = setup(on, [adding('a', 'b'), adding('a')])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'delete 1')
+  expect(await run($, 'reset now')).toStartWith('Usage:')
+  expect(await run($, 'trash')).toBe('Trash\n1. a [user]\n   d-a')
+  expect(await run($, 'reset')).toBe('Emptied the list and the trash.')
+  expect(await run($, '')).toBe('No open items.')
+  expect(await run($, 'trash')).toBe('The trash is empty.')
+  await turn($, clock, {})
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a')
+  await clock.advance(0)
+  expect(submitted).toEqual([])
+})
+
+const GROUP = JSON.stringify({ remove: [3], add: [{ title: 'd', detail: 'd-d' }] })
+
+test('refresh keeps open items, trashes removed ones and appends new ones', async ($, on) => {
+  const { clock } = setup(on, [adding('a', 'b', 'c')])
+  const forked = mockFork(on, [answered(GROUP)])
+  await start($)
+  await turn($, clock, {})
+  expect(await run($, 'refresh')).toBe('Refreshed the list: 3 items.')
+  expect(forked[0]).toContain('Current list:\n1. a\n   d-a\n2. b\n   d-b\n3. c\n   d-c')
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a\n2. b\n   d-b\n3. d\n   d-d')
+  expect(await run($, 'trash')).toBe('Trash\n1. c [model]\n   d-c')
+})
+
+test('a refresh update rewrites only the detail', async ($, on) => {
+  const { clock } = setup(on, [adding('a', 'b')])
+  mockFork(on, [
+    answered('{"remove":[],"add":[],"update":[{"number":2,"title":"other","detail":" new\\ndetail "}]}'),
+  ])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'refresh')
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a\n2. b\n   new\n   detail')
+  expect(await run($, 'trash')).toBe('The trash is empty.')
+})
+
+test('an invalid or unparseable refresh reply keeps the list and reports the failure', async ($, on) => {
+  const { clock } = setup(on, [adding('a', 'b')])
+  const replies: Reply[] = [
+    answered('{"remove":[2],"add":[],"update":[{"number":2,"detail":"x"}]}'),
+    answered('{"remove":[],"add":[],"update":[{"number":2,"detail":"x"},{"number":2,"detail":"y"}]}'),
+    answered('{"remove":[],"add":[],"update":[{"number":2,"detail":"  "}]}'),
+    answered('{"remove":[],"add":[],"update":[{"number":3,"detail":"x"}]}'),
+    answered('{"remove":[3],"add":[]}'),
+    answered('not json'),
+    { isAnswered: false, reason: 'api-error' },
+  ]
+  const { length } = replies
+  mockFork(on, replies)
+  await start($)
+  await turn($, clock, {})
+  for (let i = 0; i < length; i += 1) {
+    expect(await run($, 'refresh')).toStartWith('Refresh failed')
+  }
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a\n2. b\n   d-b')
+  expect(await run($, 'trash')).toBe('The trash is empty.')
+})
+
+const NOTHING_TO_FORK: Reply = { isAnswered: false, reason: 'nothing-to-fork' }
+const MAIN_MODEL = 'main-model'
+const TRANSCRIPT_NOTE = 'rebuilt from the transcript without the prompt cache'
+
+type Message = { role: 'user' | 'assistant'; text: string; toolUses: { tool: string; text?: string }[] }
+const said = (role: Message['role'], text: string, toolUses: Message['toolUses'] = []): Message => ({
+  role,
+  text,
+  toolUses,
+})
+
+// Answers `/todos refresh` with nothing to fork, as right after a resume.
+function mockTranscript(on: On, messages: Message[], forks = 1) {
+  mockFork(on, Array.from({ length: forks }, () => NOTHING_TO_FORK))
+  on('session.messages', () => ({ value: messages as never }))
+  on('session.model', () => ({ value: MAIN_MODEL }))
+}
+
+test('refresh with nothing to fork rebuilds from the transcript on the session model', async ($, on) => {
+  const { asked, models, clock } = setup(on, [adding('a', 'b', 'c'), answered(GROUP)])
+  mockTranscript(on, [
+    said('user', 'question-text'),
+    said('assistant', 'answer-text', [{ tool: 'Bash', text: 'tool-output' }]),
+    said('user', ''),
+  ])
+  await start($)
+  await turn($, clock, {})
+  expect(await run($, 'refresh')).toBe(`Refreshed the list: 3 items. It was ${TRANSCRIPT_NOTE}.`)
+  expect(models.at(-1)).toBe(MAIN_MODEL)
+  const prompt = asked.at(-1) ?? ''
+  expect(prompt).toContain('[user]\nquestion-text\n\n[assistant]\nanswer-text\n\n[tool Bash]\ntool-output')
+  expect(prompt).toContain('against the transcript above')
+  expect(prompt).toContain('Current list:\n1. a\n   d-a\n2. b\n   d-b\n3. c\n   d-c')
+  expect(prompt.indexOf('question-text')).toBeLessThan(prompt.indexOf('Current list:'))
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a\n2. b\n   d-b\n3. d\n   d-d')
+  expect(await run($, 'trash')).toBe('Trash\n1. c [model]\n   d-c')
+})
+
+test('a transcript refresh that fails keeps the list and reports the failure', async ($, on) => {
+  const { clock } = setup(on, [adding('a'), answered('not json'), { isAnswered: false, reason: 'timeout' }])
+  mockTranscript(on, [said('user', 'hi')], 2)
+  await start($)
+  await turn($, clock, {})
+  expect(await run($, 'refresh')).toBe('Refresh failed (unparseable reply); the list is unchanged.')
+  expect(await run($, 'refresh')).toBe('Refresh failed (timeout); the list is unchanged.')
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a')
+})
+
+test('a long tool result is clipped in the transcript', async ($, on) => {
+  const { asked, clock } = setup(on, [adding('a'), answered(NOOP)])
+  const result = `HEAD${'x'.repeat(TRANSCRIPT_TOOL_RESULT_TEXT * 2)}TAIL`
+  mockTranscript(on, [said('assistant', 'done', [{ tool: 'Read', text: result }])])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'refresh')
+  const prompt = asked.at(-1) ?? ''
+  expect(prompt).toContain('[tool Read]\nHEAD')
+  expect(prompt).toContain('[truncated]\n')
+  expect(prompt).toContain('TAIL')
+  expect(prompt).not.toContain(result)
+})
+
+test('a long transcript keeps the newest messages whole', async ($, on) => {
+  const { asked, clock } = setup(on, [adding('a'), answered(NOOP)])
+  const size = TRANSCRIPT_TEXT * 0.4
+  mockTranscript(on, [
+    said('user', `oldest${'x'.repeat(size)}`),
+    said('assistant', `older${'x'.repeat(size)}`),
+    said('user', `newer${'x'.repeat(size)}`),
+    said('assistant', `newest${'x'.repeat(size)}`),
+  ])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'refresh')
+  const prompt = asked.at(-1) ?? ''
+  expect(prompt).not.toContain('oldest')
+  expect(prompt).not.toContain('older')
+  expect(prompt).toContain('newer')
+  expect(prompt).toContain('newest')
+  expect(prompt).not.toContain('[truncated]')
+})
+
+test('an empty transcript fails without a model request and keeps the list', async ($, on) => {
+  const { asked, clock } = setup(on, [adding('a')])
+  mockTranscript(on, [said('user', '')])
+  await start($)
+  await turn($, clock, {})
+  expect(await run($, 'refresh')).toBe(
+    'Refresh failed: the main conversation has no messages yet, so there is nothing to refresh from. Send a message and try again.',
+  )
+  expect(asked).toHaveLength(1)
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a')
+})
+
+test('a refresh that sends nothing keeps the review count, and one that sends resets it', async ($, on) => {
+  const { asked, clock } = setup(on, [adding('a'), ...noops(REVIEW_TURNS), answered(NOOP), ...noops(REVIEW_TURNS)])
+  const transcript: Message[] = []
+  mockTranscript(on, transcript, 3)
+  await start($)
+  await turns($, clock, REVIEW_TURNS - 1)
+  expect(await run($, 'refresh')).toStartWith('Refresh failed: the main conversation has no messages')
+  await turns($, clock, 1, REVIEW_TURNS)
+  expect(asked).toHaveLength(REVIEW_TURNS + 1)
+  expect(asked.at(-1)).toContain(`Turn 1 of ${REVIEW_TURNS}`)
+
+  await turns($, clock, REVIEW_TURNS - 1, REVIEW_TURNS + 1)
+  transcript.push(said('user', 'hi'))
+  expect(await run($, 'refresh')).toContain(TRANSCRIPT_NOTE)
+  const before = asked.length
+  await turns($, clock, 1, 2 * REVIEW_TURNS)
+  expect(asked).toHaveLength(before + 1)
 })
