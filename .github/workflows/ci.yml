@@ -37,9 +37,10 @@ jobs:
       # Claude Code writes the typings only while it loads the mod, and neither
       # validate nor test does that, so start a throwaway session, wait for the
       # files, and stop it. The dummy key keeps it from needing a login; it
-      # never gets past retrying the API.
+      # never gets past retrying the API. Claude Code 2.1.295 and later write
+      # no typings in -p sessions, so only the pinned version runs this.
       - name: Generate typings
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.claude != 'latest'
         run: |
           export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude-typings-config"
           mkdir -p "$CLAUDE_CONFIG_DIR"
@@ -60,5 +61,5 @@ jobs:
           fi
 
       - name: Type check
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.claude != 'latest'
         run: npx -y -p typescript@7.0.2 tsc --noEmit -p .
