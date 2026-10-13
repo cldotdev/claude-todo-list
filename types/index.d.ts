@@ -22,6 +22,7 @@ declare module 'claude-code' {
       review: ReviewTurn[]
       focused: string
       detailed: string
+      windowStart: number
       deleting: string
       selected: string[]
       lastAnswer: string

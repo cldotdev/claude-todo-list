@@ -329,3 +329,29 @@ export function applyRefresh(text: string, items: readonly TodoItem[]): TodoItem
   )
   return cleanItems([...kept, ...add])
 }
+
+// How many items the band shows at a time.
+export const WINDOW_SIZE = 10
+
+// The window's first item: `start` moved the least distance that shows the
+// item at `index` (-1 for none), then held so the window stays full.
+export function windowFor(length: number, start: number, index: number): number {
+  let next = start
+  if (index !== -1) {
+    next = Math.min(Math.max(next, index - WINDOW_SIZE + 1), index)
+  }
+  return Math.min(Math.max(next, 0), Math.max(0, length - WINDOW_SIZE))
+}
+
+// A page move from the window drawn over the item at `index`: the new start,
+// and the item that keeps the focus's row. Null when the window cannot move.
+export function pageFor(
+  length: number,
+  start: number,
+  index: number,
+  step: 1 | -1,
+): { start: number; index: number } | null {
+  const drawn = windowFor(length, start, index)
+  const next = windowFor(length, drawn + step * WINDOW_SIZE, -1)
+  return next === drawn ? null : { start: next, index: index + next - drawn }
+}

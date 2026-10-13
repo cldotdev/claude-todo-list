@@ -52,7 +52,7 @@ claude plugin install todo-list@claude-todo-list
 
 ### Band
 
-清單有事項時，prompt 上方的 band 會顯示加上編號的清單。
+清單有事項時，prompt 上方的 band 會顯示加上編號的清單。band 一次最多顯示 10 個事項，編號仍是整份清單的編號，視窗下方會用暗色的 `<n> more` 標出後面還有幾個事項。離開 band 後，視窗會回到最前面。
 
 | 按鍵 | 動作 |
 | --- | --- |
@@ -60,7 +60,8 @@ claude plugin install todo-list@claude-todo-list
 | `j`/`k`、`Tab`/`Shift+Tab` | 移到下一個或上一個事項 |
 | `s` | 選取或取消選取焦點所在的事項 |
 | `a` | 選取所有事項，所有事項都已選取時則清除選取 |
-| `p` | 把已選取的事項貼到 prompt 輸入框，沒有選取時貼焦點所在的事項，每項都附上它在 band 裡的編號 |
+| `n`/`p` | 把視窗往下或往上翻最多 10 個事項，焦點會留在視窗裡的同一列。清單只有 10 個以下事項、視窗已無法再移動，或正在顯示事項說明時，不會有動作 |
+| `v` | 把已選取的事項貼到 prompt 輸入框，沒有選取時貼焦點所在的事項，每項都附上它在 band 裡的編號 |
 | `o`/`Enter` | 顯示焦點所在事項的說明，或回到清單 |
 | `b` | 用 `/btw` 詢問焦點所在的事項，Claude 正在工作時會等目前這一輪結束才回答 |
 | `d` | 刪除焦點所在的事項，要再按一次 `d` 確認，按 `Esc` 取消 |
@@ -71,7 +72,7 @@ claude plugin install todo-list@claude-todo-list
 | 路徑 | 內容 |
 | --- | --- |
 | `hooks/register.tsx` | 事件 hook、`/todos` 指令和 band |
-| `hooks/list.ts` | 給模型的 prompt 和回覆解析 |
+| `hooks/list.ts` | 給模型的 prompt、回覆解析和 band 視窗的計算 |
 | `types/index.d.ts` | mod 的 state 型別定義 |
 | `tests/` | 由 `claude plugin test` 執行的測試 |
 

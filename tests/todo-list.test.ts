@@ -11,6 +11,7 @@ import {
   REVIEW_TURNS,
   TRANSCRIPT_TEXT,
   TRANSCRIPT_TOOL_RESULT_TEXT,
+  pageFor,
 } from '../hooks/list'
 
 const USAGE = { input_tokens: 1, output_tokens: 1 } as never
@@ -115,7 +116,7 @@ test('a normal answer updates the list and draws the band', async ($, on) => {
   expect(asked[0]).toContain('ask')
   const { texts, buttons } = await shown($)
   expect(texts.map(one => one.trim())).toContain('Todos')
-  expect(buttons).toBe(10)
+  expect(buttons).toBe(12)
 })
 
 test('subagent and aborted turns are skipped', async ($, on) => {
@@ -141,7 +142,7 @@ test('a failed or unparseable completion keeps the previous list', async ($, on)
   }
   const { texts, buttons } = await shown($)
   expect(texts.map(one => one.trim())).toContain('Todos')
-  expect(buttons).toBe(9)
+  expect(buttons).toBe(11)
 })
 
 // Moves the band's focus ring onto one of its Buttons, as Tab would.
@@ -169,7 +170,7 @@ test('the paste key pastes the focused item, numbered as in the band, when nothi
   await ui.press({ key: 'paste' })
   await ui.unmount()
   expect(filled).toEqual(['> 2. b\n>    d-b\n\n'])
-  expect((await shown($)).buttons).toBe(10)
+  expect((await shown($)).buttons).toBe(12)
 })
 
 test('the focus ring skips the hidden hotkey Buttons and wraps around the rows', async ($, on) => {
@@ -197,12 +198,12 @@ test('/todos delete removes an item, records it and keeps it from coming back', 
 
   const removed = await $.command.run({ command: 'todos', args: 'delete 1', origin, presentation })
   expect(removed.text).toBe('Removed 1 item:\n1. a')
-  expect((await shown($)).buttons).toBe(9)
+  expect((await shown($)).buttons).toBe(11)
 
   await turn($, clock, {})
   expect(asked[1]).toContain('Items the user removed')
   expect(asked[1]).toContain('["a"]')
-  expect((await shown($)).buttons).toBe(9)
+  expect((await shown($)).buttons).toBe(11)
 })
 
 test('the band shows every item', async ($, on) => {
@@ -212,7 +213,7 @@ test('the band shows every item', async ($, on) => {
   await start($)
   await turn($, clock, {})
   const { texts, buttons } = await shown($)
-  expect(buttons).toBe(15)
+  expect(buttons).toBe(17)
   expect(texts.map(one => one.trim())).toContain('Todos')
 })
 
@@ -565,10 +566,10 @@ test('the select key toggles the focused item and marks it', async ($, on) => {
   await focusRow($, 1)
   await band.press({ key: 'select' })
   expect(await marks(band)).toBe(1)
-  expect(await helpOf(band)).toContain('p paste 1')
+  expect(await helpOf(band)).toContain('v paste 1')
   await band.press({ key: 'select' })
   expect(await marks(band)).toBe(0)
-  expect(await helpOf(band)).toContain('p paste ·')
+  expect(await helpOf(band)).toContain('v paste ·')
   await band.unmount()
 })
 
@@ -587,7 +588,7 @@ test('the paste key pastes the selected items in list order with their band numb
   await band.press({ key: 'select' })
   await focusRow($, 1)
   await band.press({ key: 'select' })
-  expect(await helpOf(band)).toContain('p paste 2')
+  expect(await helpOf(band)).toContain('v paste 2')
   await band.press({ key: 'paste' })
   expect(filled).toEqual(['> 2. b\n>    d-b\n>\n> 5. e\n>    d-e\n\n'])
   expect(await marks(band)).toBe(0)
@@ -603,7 +604,7 @@ test('a selected item that is deleted drops out of the paste', async ($, on) => 
   await band.press({ key: 'delete' })
   await clock.advance(0)
   expect(await marks(band)).toBe(2)
-  expect(await helpOf(band)).toContain('p paste 2')
+  expect(await helpOf(band)).toContain('v paste 2')
   await band.press({ key: 'paste' })
   expect(filled).toEqual(['> 1. a\n>    d-a\n>\n> 2. c\n>    d-c\n\n'])
   await band.unmount()
@@ -659,6 +660,156 @@ test('numbers are padded so the titles under 1. and 11. start in one column', as
   const lines = await listed()
   expect(lines[0]).toBe('1.  a')
   expect(lines[20]).toBe('11. k')
+})
+
+const listOf = (count: number) =>
+  JSON.stringify({
+    remove: [],
+    add: Array.from({ length: count }, (_, i) => ({ title: `t${i + 1}`, detail: `d-t${i + 1}` })),
+  })
+
+// The item numbers the band draws, and the `<n> more` line when there is one.
+async function windowOf(band: Mounted<'terminal', 'AbovePrompt'>) {
+  const texts = (await band.findAll({ type: 'Text' })).map(one => one.text.trim())
+  return {
+    numbers: texts.filter(one => /^\d+\.$/.test(one)).map(one => parseInt(one, 10)),
+    more: texts.find(one => / more$/.test(one)),
+  }
+}
+
+const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i)
+
+test('the band shows a 10-item window with the count of the items after it', async ($, on) => {
+  const { band } = await bandWith($, on, listOf(25))
+  expect(await windowOf(band)).toEqual({ numbers: range(1, 10), more: '15 more' })
+  await focusRow($, 24)
+  expect(await windowOf(band)).toEqual({ numbers: range(16, 25), more: undefined })
+  await band.unmount()
+})
+
+test('a short list shows whole with no more line', async ($, on) => {
+  const { band } = await bandWith($, on, listOf(7))
+  expect(await windowOf(band)).toEqual({ numbers: range(1, 7), more: undefined })
+  await band.unmount()
+})
+
+test('focus moves scroll the window by the least distance', async ($, on) => {
+  const { band } = await bandWith($, on, listOf(25))
+  await focusRow($, 9)
+  await focusRow($, 10)
+  expect(await dotted(band)).toBe('t11')
+  expect((await windowOf(band)).numbers).toEqual(range(2, 11))
+
+  await focusRow($, 1)
+  expect(await dotted(band)).toBe('t2')
+  expect((await windowOf(band)).numbers).toEqual(range(2, 11))
+  await focusRow($, 0)
+  expect((await windowOf(band)).numbers).toEqual(range(1, 10))
+
+  await focusRow($, 24)
+  expect((await windowOf(band)).numbers).toEqual(range(16, 25))
+  await focusRow($, 0)
+  expect(await dotted(band)).toBe('t1')
+  expect((await windowOf(band)).numbers).toEqual(range(1, 10))
+  await band.unmount()
+})
+
+test('paging stays full, moves by up to 10 items, and keeps the focus row', () => {
+  expect(pageFor(25, 0, 4, 1)).toEqual({ start: 10, index: 14 })
+  expect(pageFor(25, 10, 14, 1)).toEqual({ start: 15, index: 19 })
+  expect(pageFor(25, 15, 19, 1)).toBeNull()
+  expect(pageFor(25, 5, 7, -1)).toEqual({ start: 0, index: 2 })
+  expect(pageFor(25, 0, 4, -1)).toBeNull()
+  expect(pageFor(7, 0, 3, 1)).toBeNull()
+  // A stale start is read as the window drawn around the focus.
+  expect(pageFor(25, 0, 24, -1)).toEqual({ start: 5, index: 14 })
+})
+
+test('the paging keys change nothing at an edge of the list', async ($, on) => {
+  const { band } = await bandWith($, on, listOf(25))
+  await focusRow($, 4)
+  await band.press({ key: 'previous-page' })
+  expect(await dotted(band)).toBe('t5')
+  expect((await windowOf(band)).numbers).toEqual(range(1, 10))
+  await band.unmount()
+})
+
+test('the paging keys change nothing on a list of 10 items or fewer', async ($, on) => {
+  const { band } = await bandWith($, on, listOf(10))
+  await focusRow($, 3)
+  await band.press({ key: 'next-page' })
+  await band.press({ key: 'previous-page' })
+  expect(await dotted(band)).toBe('t4')
+  expect((await windowOf(band)).numbers).toEqual(range(1, 10))
+  await band.unmount()
+})
+
+test('the paging keys change nothing in the details view', async ($, on) => {
+  const { band } = await bandWith($, on, listOf(25))
+  await focusRow($, 4)
+  await band.press({ key: 'details' })
+  expect((await windowOf(band)).more).toBeUndefined()
+  await band.press({ key: 'next-page' })
+  expect((await band.findAll({ type: 'Text' })).map(one => one.text.trim())).toContain('d-t5')
+  await band.press({ key: 'details' })
+  expect(await dotted(band)).toBe('t5')
+  expect((await windowOf(band)).numbers).toEqual(range(1, 10))
+  await band.unmount()
+})
+
+test('the paste key is v and the paging keys are n and p', async ($, on) => {
+  const { band, filled } = await bandWith($, on, listOf(11))
+  const buttons = await band.findAll({ type: 'Button' })
+  const hotkeys = Object.fromEntries(buttons.map(one => [one.props.label, one.props.hotkey]))
+  expect(hotkeys).toMatchObject({ 'next page': 'n', 'previous page': 'p', paste: 'v' })
+  await focusRow($, 2)
+  await band.press({ key: 'previous-page' })
+  expect(filled).toEqual([])
+  await band.unmount()
+})
+
+test('the help line names the paging keys only while the list holds more than 10 items', async ($, on) => {
+  const long = await bandWith($, on, listOf(11))
+  await focusRow($, 0)
+  expect(await helpOf(long.band)).toContain('n/p page')
+  expect(await helpOf(long.band)).toContain('v paste')
+  await long.band.unmount()
+})
+
+test('the help line leaves the paging keys out in the details view', async ($, on) => {
+  const { band } = await bandWith($, on, listOf(11))
+  await focusRow($, 0)
+  await band.press({ key: 'details' })
+  expect(await helpOf(band)).not.toContain('n/p page')
+  await band.unmount()
+})
+
+test('the help line leaves the paging keys out at 10 items', async ($, on) => {
+  const { band } = await bandWith($, on, listOf(10))
+  await focusRow($, 0)
+  expect(await helpOf(band)).toContain('v paste')
+  expect(await helpOf(band)).not.toContain('n/p page')
+  await band.unmount()
+})
+
+test('leaving the band puts the window back at the top', async ($, on) => {
+  const { band } = await bandWith($, on, listOf(25))
+  await focusRow($, 14)
+  expect((await windowOf(band)).numbers).toEqual(range(6, 15))
+  await $.ui.focus({ component: 'AbovePrompt', requestId: 'band', origin: { kind: 'person' } })
+  expect((await windowOf(band)).numbers).toEqual(range(1, 10))
+  await band.unmount()
+})
+
+test('a delete in the last window pulls the window up so it stays full', async ($, on) => {
+  const { clock, band } = await bandWith($, on, listOf(25))
+  await focusRow($, 24)
+  await focusRow($, 19)
+  await band.press({ key: 'delete' })
+  await band.press({ key: 'delete' })
+  await clock.advance(0)
+  expect(await windowOf(band)).toEqual({ numbers: range(15, 24), more: undefined })
+  await band.unmount()
 })
 
 const NOOP = '{"remove":[],"add":[]}'

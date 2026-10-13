@@ -9,6 +9,7 @@ import {
   REVIEW_SYSTEM,
   REVIEW_TURNS,
   SYSTEM,
+  WINDOW_SIZE,
   type RemovedTitles,
   applyChanges,
   applyRefresh,
@@ -22,7 +23,9 @@ import {
   refreshPrompt,
   renderTranscript,
   removedTitles,
+  pageFor,
   reviewPrompt,
+  windowFor,
 } from './list'
 
 const MODEL = 'sonnet'
@@ -41,7 +44,9 @@ const PREVIOUS_KEY = 'k'
 const DETAILS_KEY = 'o'
 const SELECT_KEY = 's'
 const SELECT_ALL_KEY = 'a'
-const PASTE_KEY = 'p'
+const PASTE_KEY = 'v'
+const NEXT_PAGE_KEY = 'n'
+const PREVIOUS_PAGE_KEY = 'p'
 const ASK_KEY = 'b'
 const DELETE_KEY = 'd'
 // Not hotkeys: Enter presses the focused row's Button, which shows its detail.
@@ -94,6 +99,9 @@ const detailed = atom({ plugin: 'todo-list', key: 'detailed' } as const, '')
 const deleting = atom({ plugin: 'todo-list', key: 'deleting' } as const, '')
 // Titles of the items picked for a paste. Session-only: never written to the store.
 const selected = atom({ plugin: 'todo-list', key: 'selected' } as const, [] as string[])
+// The index of the window's first item. Like the focus, it lasts only while the
+// band holds the focus.
+const windowStart = atom({ plugin: 'todo-list', key: 'windowStart' } as const, 0)
 // The last main-loop answer, which the next user message often replies to.
 const lastAnswer = atom({ plugin: 'todo-list', key: 'lastAnswer' } as const, '')
 // Finished turns not yet applied. They live in $.state, not the module, because
@@ -171,10 +179,13 @@ async function disarm($: EngineInterface) {
   }
 }
 
-// The dot, the selection, a pending delete, and the detail view last only
-// while the band holds the focus.
+// The dot, the selection, a pending delete, the detail view, and the window's
+// position last only while the band holds the focus.
 async function leave($: EngineInterface) {
-  const [current, shown] = await Promise.all([read($, focused), read($, detailed)])
+  const [current, shown, start] = await Promise.all([read($, focused), read($, detailed), read($, windowStart)])
+  if (start !== 0) {
+    await update($, windowStart, () => 0)
+  }
   if (current !== '') {
     await update($, focused, () => '')
   }
@@ -354,12 +365,25 @@ async function askAbout($: EngineInterface, isWorking: boolean) {
   }
 }
 
-// Puts the dot on an item. A delete armed on another item is cancelled, and
-// the detail view walks from one item's detail to the next.
+// Puts the dot on an item. A delete armed on another item is cancelled, the
+// detail view walks from one item's detail to the next, and the window scrolls
+// just far enough to show the item.
 async function focusItem($: EngineInterface, title: string) {
-  const [current, shownTitle, armed] = await Promise.all([read($, focused), read($, detailed), read($, deleting)])
+  const [list, current, shownTitle, armed, start] = await Promise.all([
+    read($, items),
+    read($, focused),
+    read($, detailed),
+    read($, deleting),
+    read($, windowStart),
+  ])
   if (current !== title) {
     await update($, focused, () => title)
+  }
+  // Start from the window as drawn, which clamps a stale start.
+  const drawn = windowFor(list.length, start, list.findIndex(one => one.title === current))
+  const scrolled = windowFor(list.length, drawn, list.findIndex(one => one.title === title))
+  if (scrolled !== start) {
+    await update($, windowStart, () => scrolled)
   }
   if (armed !== '' && armed !== title) {
     await update($, deleting, () => '')
@@ -382,6 +406,29 @@ async function moveFocus($: EngineInterface, requestId: string, step: 1 | -1) {
   const { deny } = await $.ui.focus({ requestId, key: `${ROW_PREFIX}${target}` })
   if (deny === undefined) {
     await focusItem($, list[target]!.title)
+  }
+}
+
+// Moves the window a page down or up, and the focus with it so the focus keeps
+// its row. Like moveFocus, it moves the ring itself.
+async function movePage($: EngineInterface, requestId: string, step: 1 | -1) {
+  const [list, current, start, shownTitle] = await Promise.all([
+    read($, items),
+    read($, focused),
+    read($, windowStart),
+    read($, detailed),
+  ])
+  const index = list.findIndex(one => one.title === current)
+  const page = shownTitle === '' && index !== -1 ? pageFor(list.length, start, index, step) : null
+  if (page === null) {
+    return
+  }
+  const { deny } = await $.ui.focus({ requestId, key: `${ROW_PREFIX}${page.index}` })
+  if (deny === undefined) {
+    // focusItem scrolls the least distance from the old focus, so the page's
+    // own start is set after it.
+    await focusItem($, list[page.index]!.title)
+    await update($, windowStart, () => page.start)
   }
 }
 
@@ -529,7 +576,13 @@ const schedulePending = ($: EngineInterface) => {
 }
 
 // The band's own keys work only while it holds the focus.
-function helpLine(isFocused: boolean, isArmed: boolean, isDetailed: boolean, selectedCount: number): string {
+function helpLine(
+  isFocused: boolean,
+  isArmed: boolean,
+  isDetailed: boolean,
+  selectedCount: number,
+  itemTotal: number,
+): string {
   if (!isFocused) {
     return 'Ctrl+X Tab to focus'
   }
@@ -538,7 +591,8 @@ function helpLine(isFocused: boolean, isArmed: boolean, isDetailed: boolean, sel
   }
   const pasting = selectedCount > 0 ? `${PASTE_KEY} paste ${selectedCount}` : `${PASTE_KEY} paste`
   const toggle = isDetailed ? 'list' : 'details'
-  return `${NEXT_KEY}/${PREVIOUS_KEY} move · ${SELECT_KEY} select · ${SELECT_ALL_KEY} select all · ${pasting} · ${DETAILS_KEY}/${ENTER_KEY} show ${toggle} · ${ASK_KEY} ask /btw · ${DELETE_KEY} delete · ${LEAVE_KEY} leave`
+  const paging = itemTotal > WINDOW_SIZE && !isDetailed ? ` · ${NEXT_PAGE_KEY}/${PREVIOUS_PAGE_KEY} page` : ''
+  return `${NEXT_KEY}/${PREVIOUS_KEY} move${paging} · ${SELECT_KEY} select · ${SELECT_ALL_KEY} select all · ${pasting} · ${DETAILS_KEY}/${ENTER_KEY} show ${toggle} · ${ASK_KEY} ask /btw · ${DELETE_KEY} delete · ${LEAVE_KEY} leave`
 }
 
 const itemCount = (n: number) => `${n} ${n === 1 ? 'item' : 'items'}`
@@ -830,12 +884,13 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const [list, current, openTitle, armed, selectedTitles] = await Promise.all([
+    const [list, current, openTitle, armed, selectedTitles, storedStart] = await Promise.all([
       read($, items),
       read($, focused),
       read($, detailed),
       read($, deleting),
       read($, selected),
+      read($, windowStart),
     ])
     const picked = pickedFrom(list, selectedTitles)
     const { isWorking } = e.props
@@ -847,6 +902,8 @@ export const register: Register = on => {
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const numberWidth = labelWidth(list.length)
+    const first = windowFor(list.length, storedStart, list.findIndex(one => one.title === current))
+    const after = Math.max(0, list.length - first - WINDOW_SIZE)
 
     return (
       <Box flexDirection="column">
@@ -859,7 +916,8 @@ export const register: Register = on => {
           const button = (
             <Button key={`${ROW_PREFIX}${i}`} label=" " plain onPress={() => toggleDetails($)} />
           )
-          if (opened !== undefined && item !== opened) {
+          const isHidden = opened !== undefined ? item !== opened : i < first || i >= first + WINDOW_SIZE
+          if (isHidden) {
             return (
               <Box key={`row-${i}`} width={0} height={0} overflow="hidden">
                 {button}
@@ -899,6 +957,12 @@ export const register: Register = on => {
             </Box>
           )
         })}
+        {opened === undefined && after > 0 && (
+          <Text dimColor>
+            {GUTTER}
+            {after} more
+          </Text>
+        )}
         {opened !== undefined && (
           <Box flexDirection="row">
             <Text>{' '.repeat(GUTTER.length + numberWidth)}</Text>
@@ -908,13 +972,15 @@ export const register: Register = on => {
         <Box flexDirection="row">
           <Text dimColor>
             {GUTTER}
-            {helpLine(current !== '', armed !== '', opened !== undefined, picked.length)}
+            {helpLine(current !== '', armed !== '', opened !== undefined, picked.length, list.length)}
           </Text>
           {/* Holds the hotkeys out of sight: a drawn hotkey takes the accent color. */}
           <Box width={0} overflow="hidden">
             <Button key="next" label="next" hotkey={NEXT_KEY} plain onPress={() => moveFocus($, e.requestId, 1)} />
             <Button key="previous" label="previous" hotkey={PREVIOUS_KEY} plain onPress={() => moveFocus($, e.requestId, -1)} />
             <Button key="details" label="details" hotkey={DETAILS_KEY} plain onPress={() => toggleDetails($)} />
+            <Button key="next-page" label="next page" hotkey={NEXT_PAGE_KEY} plain onPress={() => movePage($, e.requestId, 1)} />
+            <Button key="previous-page" label="previous page" hotkey={PREVIOUS_PAGE_KEY} plain onPress={() => movePage($, e.requestId, -1)} />
             <Button key="paste" label="paste" hotkey={PASTE_KEY} plain onPress={() => paste($)} />
             <Button key="select" label="select" hotkey={SELECT_KEY} plain onPress={() => toggleSelected($)} />
             <Button key="select-all" label="select all" hotkey={SELECT_ALL_KEY} plain onPress={() => toggleAll($)} />

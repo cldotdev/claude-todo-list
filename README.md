@@ -52,7 +52,7 @@ claude plugin install todo-list@claude-todo-list
 
 ### The Band
 
-The band above the prompt shows the numbered list while it has items.
+The band above the prompt shows the numbered list while it has items. It shows at most 10 items at a time as a window over the list, each with its number in the whole list, and a dim `<n> more` line under them counts the items after the window. Leaving the band puts the window back at the top.
 
 | Key | Action |
 | --- | --- |
@@ -60,7 +60,8 @@ The band above the prompt shows the numbered list while it has items.
 | `j`/`k`, `Tab`/`Shift+Tab` | Move to the next or previous item. |
 | `s` | Select or unselect the focused item. |
 | `a` | Select every item, or clear the selection when every item is already selected. |
-| `p` | Paste the selected items, or the focused item when none is selected, into the prompt box. Each is quoted with its number in the band. |
+| `n`/`p` | Move the window down or up by up to 10 items; the focus keeps its row in the window. They do nothing with 10 or fewer items, when the window cannot move further, or in the detail view. |
+| `v` | Paste the selected items, or the focused item when none is selected, into the prompt box. Each is quoted with its number in the band. |
 | `o`/`Enter` | Show the focused item's detail, or go back to the list. |
 | `b` | Ask `/btw` about the focused item. While Claude is working, the answer waits for the current turn to end. |
 | `d` | Delete the focused item; a second `d` confirms and `Esc` cancels. |
@@ -71,7 +72,7 @@ The band above the prompt shows the numbered list while it has items.
 | Path | Contents |
 | --- | --- |
 | `hooks/register.tsx` | Event hooks, the `/todos` command, and the band. |
-| `hooks/list.ts` | Model prompts and reply parsing. |
+| `hooks/list.ts` | Model prompts, reply parsing, and the band's window arithmetic. |
 | `types/index.d.ts` | The mod's state contract. |
 | `tests/` | Tests run by `claude plugin test`. |
 
