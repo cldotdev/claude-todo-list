@@ -15,7 +15,7 @@
 - 每次主迴圈的 turn 以回答結束後，mod 會把這個 turn 送給 Sonnet (用的是 `sonnet` alias，實際模型跟著安裝的 Claude Code 版本走)，問它這個 turn 解決了清單上的哪些事項、又多出哪些新的事項。Subagent 的 turn 不算在內。
 - 待辦事項指的是有人說要延後的工作、agent 答應要做的後續工作或檢查，以及還沒有結論的問題或決定。正在執行的這一步、同一個 turn 內就完成的事，以及已經列在 OpenSpec `tasks.md` 裡的任務，都不會列入。
 - 每個事項有一行標題和一段簡短說明，語言跟 agent 回答時用的語言相同。
-- 清單按 session 分開保存，恢復 session 時會一起還原。清單超過 `cleanupPeriodDays` 設定的天數沒更新就會被刪除，這個設定也決定 Claude Code 保留 transcript 的天數，預設 30 天。`/clear` 會清空清單和垃圾桶。
+- 清單按 session 分開保存，恢復 session 時會一起還原。清單超過 `cleanupPeriodDays` 設定的天數沒更新就會被刪除，這個設定也決定 Claude Code 保留 transcript 的天數，預設 30 天。所有 session 保存的清單加起來超過 mod 儲存空間 4 MiB 上限的 80% 時，會從最久沒更新的清單開始刪除，直到降回 80% 以下，但不會刪除目前 session 的清單。清單存不下來時，每個 session 會跳一次 toast 提醒。`/clear` 會清空清單和垃圾桶。
 - 每個離開清單的事項都會進垃圾桶，記下標題、說明、是誰移除的 (你或模型) 和移除時間。每種來源各保留最新的 99 筆。你刪除的事項不會再被加回來；模型移除的事項除非對話重新提起，否則也不會再被加回來。
 - 有些事項是被後來的 turn 蓋過才失效，沒有哪一個 turn 會明確移除它，所以 mod 還會回頭檢查最近的 turn：累計 8 個有回答的 turn，或清單有 6 個以上事項且累計 3 個 turn 時執行。檢查只會移除已經不再待辦的事項，不會新增。被移除的事項可以用 `/todos restore` 放回清單。
 
@@ -73,6 +73,7 @@ claude plugin install todo-list@claude-todo-list
 | --- | --- |
 | `hooks/register.tsx` | 事件 hook、`/todos` 指令和 band |
 | `hooks/list.ts` | 給模型的 prompt、回覆解析和 band 視窗的計算 |
+| `hooks/store.ts` | 儲存用的 key，以及讓儲存空間不超過上限的計算 |
 | `types/index.d.ts` | mod 的 state 型別定義 |
 | `tests/` | 由 `claude plugin test` 執行的測試 |
 

@@ -27,9 +27,16 @@ import {
   reviewPrompt,
   windowFor,
 } from './list'
+import {
+  STORE_CAP,
+  type SavedKey,
+  keysToDrop,
+  legacyId,
+  parseKey,
+  savedKeyFor,
+} from './store'
 
 const MODEL = 'sonnet'
-const STORE_PREFIX = 'session:'
 const DAY_MS = 24 * 60 * 60 * 1000
 // Claude Code's own default for cleanupPeriodDays.
 const DEFAULT_CLEANUP_DAYS = 30
@@ -108,6 +115,10 @@ const lastAnswer = atom({ plugin: 'todo-list', key: 'lastAnswer' } as const, '')
 // a hot reload cancels the module's timers: a turn queued as the reload lands
 // waits here, and session.start, which runs again after the reload, picks it up.
 const pending = atom({ plugin: 'todo-list', key: 'pending' } as const, [] as PendingTurn[])
+// The store key this session's entry is saved under now, '' while it has none.
+const savedKey = atom({ plugin: 'todo-list', key: 'savedKey' } as const, '')
+// Whether the failed-save toast has been shown, so a hot reload does not repeat it.
+const failureShown = atom({ plugin: 'todo-list', key: 'failureShown' } as const, false)
 
 // An entry saved before items had a detail holds plain strings, and one saved
 // before the trash holds the titles the user removed as `done`.
@@ -234,15 +245,68 @@ function enqueue<T>(job: () => Promise<T>): Promise<T> {
   return run
 }
 
-async function persist($: EngineInterface) {
-  const [id, list, entries] = await Promise.all([$.session.id(), read($, items), read($, trash)])
-  const key = STORE_PREFIX + id
-  const state: TodoListState = { items: list, trash: entries }
-  if (state.items.length === 0 && state.trash.length === 0) {
+// Saves run one at a time, apart from `queue`: commit already runs inside queued
+// jobs, and the restore and purge commands save outside it.
+let saves: Promise<unknown> = Promise.resolve()
+
+function persist($: EngineInterface) {
+  const run = saves.then(() => save($))
+  saves = run.catch(() => undefined)
+  return run
+}
+
+// Deletes whole sessions, oldest first, to bring the store down to its target.
+async function freeRoom($: EngineInterface, currentId: string) {
+  const saved = (await $.store.keys()).flatMap(key => parseKey(key) ?? [])
+  for (const key of keysToDrop(saved, currentId)) {
     await $.store.delete(key)
-    return
   }
-  await $.store.set(key, { ...state, updatedAt: await $.clock.now() })
+}
+
+// A refusal for size is the only one worth a retry; a changed message turns it
+// into a reported failure.
+async function setWithRetry($: EngineInterface, currentId: string, key: string, value: unknown) {
+  try {
+    await $.store.set(key, value)
+  } catch (error) {
+    if (!String(error).includes(`over the ${STORE_CAP} limit`)) {
+      throw error
+    }
+    await freeRoom($, currentId)
+    await $.store.set(key, value)
+  }
+}
+
+// Writes the new key before deleting the old one, so a crash between them
+// leaves two keys for the session instead of none. Failures are reported here,
+// so callers carry on as if the save worked.
+async function save($: EngineInterface) {
+  try {
+    const [id, list, entries] = await Promise.all([$.session.id(), read($, items), read($, trash)])
+    const state: TodoListState = { items: list, trash: entries }
+    const isEmpty = state.items.length === 0 && state.trash.length === 0
+    const updatedAt = await $.clock.now()
+    const value = { ...state, updatedAt }
+    const key = isEmpty ? '' : savedKeyFor(id, updatedAt, JSON.stringify(value).length)
+    if (!isEmpty) {
+      await setWithRetry($, id, key, value)
+    }
+    // The swap reads the latest key; a read in another dispatch can be stale.
+    let previous = ''
+    await update($, savedKey, current => {
+      previous = current
+      return key
+    })
+    if (previous !== '' && previous !== key) {
+      await $.store.delete(previous)
+    }
+  } catch (error) {
+    $.ui.log(`Could not save the list: ${String(error)}`)
+    if (!(await read($, failureShown))) {
+      await update($, failureShown, () => true)
+      $.ui.toast('List changes are not being saved.')
+    }
+  }
 }
 
 async function commit($: EngineInterface, next: TodoItem[]) {
@@ -651,6 +715,78 @@ async function refresh($: EngineInterface, gen: number): Promise<string> {
   }
 }
 
+// Reads each legacy `session:<id>` entry once and saves it under the new key
+// format. It returns the new key, or null when the entry was deleted (invalid,
+// expired, or no newer than a new key) or its save failed.
+async function migrateLegacy(
+  $: EngineInterface,
+  key: string,
+  id: string,
+  currentId: string,
+  current: readonly SavedKey[],
+  now: number,
+  maxAge: number | null,
+): Promise<SavedKey | null> {
+  const stored = await $.store.get(key)
+  const isKept =
+    isStored(stored) &&
+    !(maxAge !== null && now - stored.updatedAt > maxAge) &&
+    !current.some(one => one.id === id && one.updatedAt >= stored.updatedAt)
+  if (!isKept) {
+    await $.store.delete(key)
+    return null
+  }
+  const size = JSON.stringify(stored).length
+  const migrated = { key: savedKeyFor(id, stored.updatedAt, size), id, updatedAt: stored.updatedAt, size }
+  try {
+    await setWithRetry($, currentId, migrated.key, stored)
+  } catch {
+    // The legacy key stays, and the next start tries again.
+    return null
+  }
+  await $.store.delete(key)
+  return migrated
+}
+
+// Brings the store down to what should be kept, reading key names only, apart
+// from each legacy entry. Returns the current session's surviving key.
+async function sweep($: EngineInterface, currentId: string): Promise<SavedKey | null> {
+  const now = await $.clock.now()
+  const maxAge = await maxAgeMs($)
+  const keys = await $.store.keys()
+  const saved = keys.flatMap(key => parseKey(key) ?? [])
+  for (const key of keys) {
+    const id = legacyId(key)
+    if (id !== null) {
+      const migrated = await migrateLegacy($, key, id, currentId, saved, now, maxAge)
+      if (migrated !== null) {
+        saved.push(migrated)
+      }
+    }
+  }
+
+  // The newest key of each session stays; the rest are older duplicates.
+  const newest = new Map<string, SavedKey>()
+  for (const one of saved) {
+    const best = newest.get(one.id)
+    if (best === undefined || one.updatedAt >= best.updatedAt) {
+      newest.set(one.id, one)
+    }
+  }
+  const kept: SavedKey[] = []
+  for (const one of saved) {
+    if (newest.get(one.id) !== one || (maxAge !== null && now - one.updatedAt > maxAge)) {
+      await $.store.delete(one.key)
+    } else {
+      kept.push(one)
+    }
+  }
+  for (const key of keysToDrop(kept, currentId)) {
+    await $.store.delete(key)
+  }
+  return kept.find(one => one.id === currentId) ?? null
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -660,17 +796,8 @@ export const register: Register = on => {
       argumentHint: '[refresh|clear|reset|trash|restore <numbers>|purge <numbers>|delete <numbers>|<prompt>]',
     })
 
-    const now = await $.clock.now()
-    const maxAge = await maxAgeMs($)
-    for (const key of await $.store.keys()) {
-      if (!key.startsWith(STORE_PREFIX)) {
-        continue
-      }
-      const stored = await $.store.get(key)
-      if (!isStored(stored) || (maxAge !== null && now - stored.updatedAt > maxAge)) {
-        await $.store.delete(key)
-      }
-    }
+    const id = await $.session.id()
+    const mine = await sweep($, id)
 
     await update($, focused, () => '')
     await update($, deleting, () => '')
@@ -678,10 +805,13 @@ export const register: Register = on => {
       schedulePending($)
     }
 
-    const mine = await $.store.get(STORE_PREFIX + (await $.session.id()))
-    if (isStored(mine)) {
-      await update($, items, () => migrate(mine.items))
-      await update($, trash, () => loadTrash(mine))
+    if (mine !== null) {
+      await update($, savedKey, () => mine.key)
+      const stored = await $.store.get(mine.key)
+      if (isStored(stored)) {
+        await update($, items, () => migrate(stored.items))
+        await update($, trash, () => loadTrash(stored))
+      }
     }
 
     return next(e)
@@ -699,7 +829,12 @@ export const register: Register = on => {
       await update($, detailed, () => '')
       await update($, deleting, () => '')
       await update($, selected, () => [])
-      await $.store.delete(STORE_PREFIX + e.sessionId)
+      await update($, savedKey, () => '')
+      for (const key of await $.store.keys()) {
+        if ((parseKey(key)?.id ?? legacyId(key)) === e.sessionId) {
+          await $.store.delete(key)
+        }
+      }
     }
 
     return next(e)

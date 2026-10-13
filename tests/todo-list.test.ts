@@ -13,6 +13,7 @@ import {
   TRANSCRIPT_TOOL_RESULT_TEXT,
   pageFor,
 } from '../hooks/list'
+import { STORE_CAP, STORE_TARGET, parseKey, storeLength } from '../hooks/store'
 
 const USAGE = { input_tokens: 1, output_tokens: 1 } as never
 const BAND = {
@@ -39,6 +40,7 @@ function setup(
   replies: Reply[],
   stored: Record<string, unknown> = {},
   settings: Record<string, unknown> = {},
+  store: (on: On, entries: Record<string, unknown>) => void = mock.store,
 ) {
   const asked: string[] = []
   const models: string[] = []
@@ -47,8 +49,9 @@ function setup(
   const landed: (string | undefined)[] = []
   const ran: { command: string; args: string }[] = []
   const toasts: string[] = []
+  const logs: string[] = []
   const clock = mock.clock(on)
-  mock.store(on, stored)
+  store(on, stored)
   on('session.start', () => ({ cwd: '/tmp' }))
   on('turn.complete', () => ({ text: 'reply' }))
   on('turn.start', () => ({ turnId: 't1' }))
@@ -62,6 +65,10 @@ function setup(
   })
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.log', (_$, e) => {
+    logs.push(e.text)
     return { value: undefined }
   })
   on('prompt.edit', (_$, e) => e as never)
@@ -82,7 +89,7 @@ function setup(
     models.push(e.model)
     return nextReply(replies)
   })
-  return { asked, models, clock, filled, landed, ran, submitted, toasts }
+  return { asked, models, clock, filled, landed, ran, submitted, toasts, logs }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -1304,4 +1311,240 @@ test('a refresh that sends nothing keeps the review count, and one that sends re
   const before = asked.length
   await turns($, clock, 1, 2 * REVIEW_TURNS)
   expect(asked).toHaveLength(before + 1)
+})
+
+// Storage
+
+const ALL_AGES = { cleanupPeriodDays: 3650 }
+const storedList = (title: string, updatedAt: number) => ({ items: [{ title, detail: '' }], trash: [], updatedAt })
+const keyOf = (id: string, value: { updatedAt: number }) => `session:${id}:${value.updatedAt}:${JSON.stringify(value).length}`
+
+// A store in memory that the test can read, count, and make fail. The kit's own
+// store cannot reject a set, and a hook cannot be added on top of it.
+function fakeStore(failSet: (key: string, setCount: number) => string | null = () => null) {
+  const map = new Map<string, unknown>()
+  const calls = { get: [] as string[], set: [] as string[] }
+  const install = (on: On, entries: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(entries)) {
+      map.set(key, value)
+    }
+    on('store.get', (_$, e) => ({ value: map.get(e.key) as never }))
+    on('store.set', (_$, e) => {
+      calls.set.push(e.key)
+      const message = failSet(e.key, calls.set.length)
+      if (message !== null) {
+        return { deny: message }
+      }
+      map.set(e.key, JSON.parse(JSON.stringify(e.value)))
+      return { value: undefined }
+    })
+    on('store.delete', (_$, e) => {
+      map.delete(e.key)
+      return { value: undefined }
+    })
+    on('store.keys', () => ({ value: [...map.keys()] }))
+  }
+  return { map, calls, install }
+}
+
+function setupStored(
+  on: On,
+  replies: Reply[],
+  stored: Record<string, unknown> = {},
+  settings: Record<string, unknown> = {},
+  failSet?: (key: string, setCount: number) => string | null,
+) {
+  const store = fakeStore(failSet)
+  return { ...setup(on, replies, stored, settings, store.install), map: store.map, calls: store.calls }
+}
+
+test('a save writes a key with its time and size, replaces it, and deletes it when everything is empty', async ($, on) => {
+  const { clock, map } = setupStored(on, [adding('a'), adding('a', 'b')])
+  await start($)
+  await clock.set(1000)
+  await turn($, clock, {})
+  const [first, ...rest] = [...map.keys()]
+  expect(rest).toEqual([])
+  const parsed = parseKey(first ?? '')
+  expect(parsed).toMatchObject({ id: 's1', updatedAt: 1000 })
+  expect(parsed?.size).toBe(JSON.stringify(map.get(first ?? '')).length)
+
+  await clock.set(2000)
+  await turn($, clock, {})
+  const second = [...map.keys()]
+  expect(second).toHaveLength(1)
+  expect(second[0]).toStartWith('session:s1:2000:')
+  expect(second[0]).not.toBe(first)
+
+  await run($, 'reset')
+  expect([...map.keys()]).toEqual([])
+})
+
+test('two saves started together leave one key holding the later list', async ($, on) => {
+  const { clock, map } = setupStored(on, [adding('a', 'b', 'c')])
+  await start($)
+  await turn($, clock, {})
+  await run($, 'delete 1-3')
+  await Promise.all([run($, 'restore 1'), run($, 'purge 2'), run($, 'purge 3')])
+  const keys = [...map.keys()]
+  expect(keys).toHaveLength(1)
+  const stored = map.get(keys[0] ?? '') as { items: { title: string }[]; trash: unknown[] }
+  expect(stored.items.map(one => one.title)).toEqual(['c'])
+  expect(stored.trash).toEqual([])
+})
+
+test('a session start resumes from the newest of duplicate keys and removes the older ones', async ($, on) => {
+  const { map } = setupStored(on, [], { 'session:s1:1000:50': storedList('old', 1000), 'session:s1:2000:60': storedList('new', 2000) }, ALL_AGES)
+  await start($)
+  expect(await run($, '')).toBe('Todos\n1. new')
+  expect([...map.keys()]).toEqual(['session:s1:2000:60'])
+})
+
+test('a legacy entry newer than the new keys wins and moves to the new key format', async ($, on) => {
+  const newer = storedList('legacy', 3000)
+  const { map } = setupStored(on, [], { 'session:s1:2000:60': storedList('new', 2000), 'session:s1': newer }, ALL_AGES)
+  await start($)
+  expect(await run($, '')).toBe('Todos\n1. legacy')
+  expect([...map.keys()]).toEqual([keyOf('s1', newer)])
+})
+
+test('a legacy entry older than a new key is removed', async ($, on) => {
+  const { map } = setupStored(on, [], { 'session:s1:2000:60': storedList('new', 2000), 'session:s1': storedList('legacy', 1000) }, ALL_AGES)
+  await start($)
+  expect(await run($, '')).toBe('Todos\n1. new')
+  expect([...map.keys()]).toEqual(['session:s1:2000:60'])
+})
+
+test('legacy entries of other sessions migrate, and an invalid one is removed', async ($, on) => {
+  const other = storedList('other', 1000)
+  const { map } = setupStored(on, [], { 'session:a': other, 'session:b': { items: 'bad' } }, ALL_AGES)
+  await start($)
+  expect([...map.keys()]).toEqual([keyOf('a', other)])
+})
+
+test('the sweep expires keys by cleanupPeriodDays without reading their values', async ($, on) => {
+  const fresh = storedList('fresh', 39 * DAY_MS)
+  const { clock, map, calls } = setupStored(on, [], { 'session:old:0:50': storedList('old', 0), [keyOf('new', fresh)]: fresh }, { cleanupPeriodDays: 30 })
+  await clock.set(40 * DAY_MS)
+  await start($)
+  expect([...map.keys()]).toEqual([keyOf('new', fresh)])
+  expect(calls.get).toEqual([])
+})
+
+test('the size helper matches the length of the store as JSON text', () => {
+  const values: Record<string, unknown> = {}
+  const saved = []
+  for (const [i, title] of ['a', 'bb', 'ccc'].entries()) {
+    const value = storedList(`${title}"\\`, i)
+    const key = keyOf(`id${i}`, value)
+    values[key] = value
+    const parsed = parseKey(key)
+    if (parsed !== null) {
+      saved.push(parsed)
+    }
+    expect(storeLength(saved)).toBe(JSON.stringify(values).length)
+  }
+  expect(storeLength([])).toBe(JSON.stringify({}).length)
+})
+
+const SIZE = Math.floor(STORE_CAP * 0.36)
+
+test('over 80% of the cap the sweep drops the oldest sessions first and stops at the target', async ($, on) => {
+  const { clock, map } = setupStored(
+    on,
+    [],
+    {
+      [`session:old:${10 * DAY_MS}:${SIZE}`]: storedList('old', 0),
+      [`session:mid:${40 * DAY_MS}:${SIZE}`]: storedList('mid', 0),
+      [`session:new:${90 * DAY_MS}:${SIZE}`]: storedList('new', 0),
+    },
+    ALL_AGES,
+  )
+  await clock.set(100 * DAY_MS)
+  await start($)
+  const kept = [...map.keys()].flatMap(key => parseKey(key)?.id ?? [])
+  expect(kept).toEqual(['mid', 'new'])
+  expect(3 * SIZE).toBeGreaterThan(STORE_TARGET)
+  expect(2 * SIZE).toBeLessThanOrEqual(STORE_TARGET)
+})
+
+test('the sweep never drops the current session', async ($, on) => {
+  const { clock, map } = setupStored(
+    on,
+    [],
+    {
+      [`session:s1:${10 * DAY_MS}:${SIZE}`]: storedList('mine', 0),
+      [`session:a:${40 * DAY_MS}:${SIZE}`]: storedList('a', 0),
+      [`session:b:${90 * DAY_MS}:${SIZE}`]: storedList('b', 0),
+    },
+    ALL_AGES,
+  )
+  await clock.set(100 * DAY_MS)
+  await start($)
+  expect([...map.keys()].flatMap(key => parseKey(key)?.id ?? [])).toEqual(['s1', 'b'])
+  expect(await run($, '')).toBe('Todos\n1. mine')
+})
+
+const OVER_CAP = `store is over the ${STORE_CAP} limit`
+
+test('a migration refused for size frees room without dropping the current session', async ($, on) => {
+  const { clock, map } = setupStored(
+    on,
+    [],
+    {
+      [`session:s1:${10 * DAY_MS}:${SIZE}`]: storedList('mine', 0),
+      [`session:a:${40 * DAY_MS}:${SIZE}`]: storedList('a', 0),
+      [`session:b:${60 * DAY_MS}:${SIZE}`]: storedList('b', 0),
+      'session:old': storedList('legacy', 90 * DAY_MS),
+    },
+    ALL_AGES,
+    (_key, count) => (count === 1 ? OVER_CAP : null),
+  )
+  await clock.set(100 * DAY_MS)
+  await start($)
+  expect([...map.keys()].flatMap(key => parseKey(key)?.id ?? [])).toEqual(['s1', 'b', 'old'])
+})
+
+test('a save refused for size frees room and is tried once more', async ($, on) => {
+  const { clock, map, calls } = setupStored(on, [adding('a')], {}, {}, (_key, count) => (count === 1 ? OVER_CAP : null))
+  await start($)
+  map.set(`session:other:1:${STORE_CAP}`, {})
+  await turn($, clock, {})
+  expect(calls.set).toHaveLength(2)
+  expect([...map.keys()].flatMap(key => parseKey(key)?.id ?? [])).toEqual(['s1'])
+})
+
+test('a save refused for another reason is not retried', async ($, on) => {
+  const { clock, toasts, calls, logs } = setupStored(on, [adding('a')], {}, {}, () => 'lock timed out')
+  await start($)
+  await turn($, clock, {})
+  expect(calls.set).toHaveLength(1)
+  expect(logs.join('\n')).toContain('lock timed out')
+  expect(toasts).toEqual(['List changes are not being saved.'])
+})
+
+test('failed saves toast once, keep the band list, and refresh does not call the list unchanged', async ($, on) => {
+  const { clock, toasts } = setupStored(on, [adding('a'), adding('a', 'b')], {}, {}, () => 'lock timed out')
+  mockFork(on, [answered(GROUP.replace('[3]', '[]'))])
+  await start($)
+  await turn($, clock, {})
+  await turn($, clock, {})
+  expect(toasts).toHaveLength(1)
+  expect((await shown($)).texts.map(one => one.trim())).toContain('Todos')
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a\n2. b\n   d-b')
+  const reply = await run($, 'refresh')
+  expect(reply).toBe('Refreshed the list: 3 items.')
+  expect(reply).not.toContain('unchanged')
+})
+
+test('/clear deletes every key of the session, legacy or new', async ($, on) => {
+  const { map } = setupStored(on, [], {
+    'session:s1:1000:50': storedList('a', 1000),
+    'session:s1:2000:60': storedList('a', 2000),
+    'session:s1': storedList('a', 500),
+    'session:other:1000:50': storedList('o', 1000),
+  }, ALL_AGES)
+  on('session.end', (_$, e) => e as never)
+  await $.session.end({ reason: 'clear', sessionId: 's1' } as never)
+  expect([...map.keys()]).toEqual(['session:other:1000:50'])
 })

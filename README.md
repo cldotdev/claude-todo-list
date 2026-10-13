@@ -15,7 +15,7 @@ Long sessions leave decisions, promised follow-ups, and unanswered questions far
 - After each main-loop turn that ends with an answer, the mod sends the turn to Sonnet (the `sonnet` alias, so the model follows the installed Claude Code version) and asks which current items the turn resolved and which new ones it opened. Subagent turns do not count.
 - An open item is work someone deferred, a follow-up or check the agent promised, or a question or decision that is not settled yet. The step being carried out right now, anything finished within the same turn, and tasks already listed in an OpenSpec `tasks.md` stay off the list.
 - Each item has a one-line title and a short detail, written in the language the agent answers in.
-- The list is kept per session and comes back when the session is resumed. A saved list left unchanged for longer than `cleanupPeriodDays`, the setting for how long Claude Code keeps transcripts (30 days by default), is dropped. `/clear` empties the list and the trash.
+- The list is kept per session and comes back when the session is resumed. A saved list left unchanged for longer than `cleanupPeriodDays`, the setting for how long Claude Code keeps transcripts (30 days by default), is dropped. When the saved lists of all sessions pass 80% of the 4 MiB the mod's store can hold, the lists left unchanged the longest are dropped until they are back at 80%, never the current session's. If a list cannot be saved, a toast says so once per session. `/clear` empties the list and the trash.
 - Every item that leaves the list goes to a trash with its title, its detail, who removed it (you or the model), and when. Each source keeps its newest 99 entries. Items you removed are never added back; items the model removed are not added back unless the conversation reopens them.
 - An item that a later turn made moot has no turn of its own to remove it, so a review also runs over the recent turns: after 8 answered turns, or after 3 when the list holds 6 or more items. It only removes items that are no longer open; it never adds any. Removed items can be brought back with `/todos restore`.
 
@@ -73,6 +73,7 @@ The band above the prompt shows the numbered list while it has items. It shows a
 | --- | --- |
 | `hooks/register.tsx` | Event hooks, the `/todos` command, and the band. |
 | `hooks/list.ts` | Model prompts, reply parsing, and the band's window arithmetic. |
+| `hooks/store.ts` | Store keys and the arithmetic that keeps the store under its size cap. |
 | `types/index.d.ts` | The mod's state contract. |
 | `tests/` | Tests run by `claude plugin test`. |
 

@@ -27,6 +27,8 @@ declare module 'claude-code' {
       selected: string[]
       lastAnswer: string
       pending: PendingTurn[]
+      savedKey: string
+      failureShown: boolean
     }
   }
 }
