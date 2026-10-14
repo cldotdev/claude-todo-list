@@ -1043,7 +1043,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Text dimColor>{'─'.repeat(e.props.bodyColumns)}</Text>
-        <Text bold>{GUTTER}Todos</Text>
+        <Text weight="semibold">{GUTTER}Todos</Text>
         {list.map((item, i) => {
           // The focus ring tracks its stop by position, so every row keeps its
           // Button in every view; dropping the hidden rows' Buttons would slide
@@ -1084,7 +1084,7 @@ export const register: Register = on => {
                 {tail !== '' && <Text dimColor>{tail}</Text>}
               </Text>
               {item.title === armed && (
-                <Text bold color={DELETE_COLOR}>
+                <Text weight="semibold" color={DELETE_COLOR}>
                   {' '}
                   delete?
                 </Text>

@@ -23,7 +23,7 @@ Each answered turn costs one extra Sonnet call, and a review adds one more, at m
 
 ## Requirements
 
-Claude Code with mod support (>= 2.1.290).
+Claude Code with mod support (>= 2.1.299).
 
 ## Installation
 

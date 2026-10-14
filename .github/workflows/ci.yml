@@ -18,7 +18,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         # The pinned version is the one the README names; latest catches plugin
         # API changes before a release reaches users.
-        claude: ["2.1.290", latest]
+        claude: ["2.1.299", latest]
     defaults:
       run:
         shell: bash
@@ -34,32 +34,48 @@ jobs:
       - name: Test
         run: claude plugin test .
 
-      # Claude Code writes the typings only while it loads the mod, and neither
-      # validate nor test does that, so start a throwaway session, wait for the
-      # files, and stop it. The dummy key keeps it from needing a login; it
-      # never gets past retrying the API. Claude Code 2.1.295 and later write
-      # no typings in -p sessions, so only the pinned version runs this.
+      # A -p session does not write a --plugin-dir mod's typings, but loading
+      # the bundled plugin-authoring skill writes this build's API
+      # declarations under TMPDIR. The dummy key keeps the session from
+      # needing a login. The step lays the file out as the engine would, with
+      # the engine's compiler options, so the repository's tsconfig.json
+      # extends it unchanged.
       - name: Generate typings
-        if: runner.os == 'Linux' && matrix.claude != 'latest'
+        if: runner.os == 'Linux'
         run: |
           export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude-typings-config"
-          mkdir -p "$CLAUDE_CONFIG_DIR"
-          ANTHROPIC_API_KEY=sk-invalid setsid claude --plugin-dir . -p x >/dev/null 2>&1 &
-          pid=$!
-          found=
-          for _ in $(seq 60); do
-            if [ -f .claude-plugin/types/tsconfig.json ] && [ -s .claude-plugin/types/claude-code/index.d.ts ]; then
-              found=1
-              break
-            fi
-            sleep 1
-          done
-          kill -- "-$pid" 2>/dev/null || true
-          if [ -z "$found" ]; then
-            echo "::error::Claude Code did not write .claude-plugin/types within 60 s"
+          export TMPDIR="$RUNNER_TEMP/claude-typings-tmp"
+          mkdir -p "$CLAUDE_CONFIG_DIR" "$TMPDIR"
+          ANTHROPIC_API_KEY=sk-invalid timeout 120 claude -p /plugin-authoring >/dev/null 2>&1 || true
+          version=$(claude --version | cut -d' ' -f1)
+          typings=$(find "$TMPDIR" -path "*/bundled-skills/$version/*/plugin-authoring/types/claude-code.d.ts" -print -quit)
+          if [ -z "$typings" ]; then
+            echo "::error::Claude Code $version did not write the plugin-authoring typings"
             exit 1
           fi
+          mkdir -p .claude-plugin/types/claude-code
+          cp "$typings" .claude-plugin/types/claude-code/index.d.ts
+          cat > .claude-plugin/types/tsconfig.json <<'EOF'
+          {
+            "compilerOptions": {
+              "target": "es2023",
+              "lib": ["es2023"],
+              "module": "esnext",
+              "moduleResolution": "bundler",
+              "strict": true,
+              "noUncheckedIndexedAccess": true,
+              "noEmit": true,
+              "skipLibCheck": true,
+              "jsx": "react",
+              "jsxFactory": "h",
+              "jsxFragmentFactory": "Fragment",
+              "typeRoots": ["."],
+              "types": ["claude-code"]
+            },
+            "include": ["../../hooks", "../../types", "../../tests"]
+          }
+          EOF
 
       - name: Type check
-        if: runner.os == 'Linux' && matrix.claude != 'latest'
+        if: runner.os == 'Linux'
         run: npx -y -p typescript@7.0.2 tsc --noEmit -p .

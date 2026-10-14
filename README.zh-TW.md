@@ -23,7 +23,7 @@
 
 ## 需求
 
-支援 mod 的 Claude Code (>= 2.1.290)。
+支援 mod 的 Claude Code (>= 2.1.299)。
 
 ## 安裝
 
