@@ -80,7 +80,9 @@ function setup(
   })
   on('ui.open', (_$, e) => {
     opened.push(e)
-    return { value: { isPlaced: placement.isPlaced } }
+    return {
+      value: placement.isPlaced ? { isPlaced: true as const } : { isPlaced: false as const, reason: 'no room for a pane' },
+    }
   })
   on('ui.close', (_$, e) => {
     closed.push(e)
