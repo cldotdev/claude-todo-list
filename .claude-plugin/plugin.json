@@ -6,5 +6,14 @@
   "homepage": "https://github.com/cldotdev/claude-todo-list",
   "repository": "https://github.com/cldotdev/claude-todo-list",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "default_view": {
+      "type": "string",
+      "title": "Default view",
+      "description": "Which view a new or resumed session starts in: the band above the prompt, or the pane beside the transcript. The pane opens only where there is room for it; otherwise the band stays. Takes effect at the next session start.",
+      "options": ["band", "pane"],
+      "default": "band"
+    }
+  }
 }

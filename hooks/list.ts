@@ -330,17 +330,75 @@ export function applyRefresh(text: string, items: readonly TodoItem[]): TodoItem
   return cleanItems([...kept, ...add])
 }
 
-// How many items the band shows at a time.
+// The most items the band shows at a time.
 export const WINDOW_SIZE = 10
+
+// Characters the terminal draws two cells wide: CJK, Hangul, and full-width forms.
+const WIDE_CLASS = '[\\u1100-\\u115F\\u2E80-\\uA4CF\\uAC00-\\uD7A3\\uF900-\\uFAFF\\uFE30-\\uFE4F\\uFF00-\\uFF60\\uFFE0-\\uFFE6]'
+const WIDE = new RegExp(WIDE_CLASS)
+// Whitespace, one wide character, or a run of narrow non-space characters.
+const WRAP_TOKEN = new RegExp(`\\s+|${WIDE_CLASS}|(?:(?!${WIDE_CLASS})\\S)+`, 'gu')
+
+export const charWidth = (ch: string) => (WIDE.test(ch) ? 2 : 1)
+export const cellWidth = (text: string) => [...text].reduce((n, ch) => n + charWidth(ch), 0)
+
+// The rows `text` takes in `columns` cells under word wrap: a row starts at each
+// newline, a Latin word moves whole to the next row, and a wide character can
+// break anywhere.
+export function wrapRows(text: string, columns: number): number {
+  const width = Math.max(1, columns)
+  let rows = 0
+  for (const line of text.split('\n')) {
+    rows += 1
+    let used = 0
+    for (const [token] of line.matchAll(WRAP_TOKEN)) {
+      const cells = cellWidth(token)
+      if (/^\s/.test(token)) {
+        if (used + cells > width) {
+          rows += 1
+          used = 0
+        } else {
+          used += cells
+        }
+      } else if (used + cells <= width) {
+        used += cells
+      } else if (cells <= width) {
+        rows += 1
+        used = cells
+      } else {
+        // A word longer than a row breaks wherever it hits the edge.
+        for (const ch of token) {
+          const w = charWidth(ch)
+          if (used + w > width) {
+            rows += 1
+            used = 0
+          }
+          used += w
+        }
+      }
+    }
+  }
+  return rows
+}
+
+// How many items a window holds in `rows` rows when the view's other lines take
+// `others` of them: the whole list when it fits with them, else what is left
+// after the `<n> more` row, at least 1 while the list has items.
+export function windowSize(rows: number, length: number, others: number, cap = Infinity): number {
+  if (length <= cap && length + others <= rows) {
+    return length
+  }
+  return Math.min(length, cap, Math.max(1, rows - others - 1))
+}
 
 // The window's first item: `start` moved the least distance that shows the
 // item at `index` (-1 for none), then held so the window stays full.
-export function windowFor(length: number, start: number, index: number): number {
+export function windowFor(length: number, start: number, index: number, size: number): number {
   let next = start
   if (index !== -1) {
-    next = Math.min(Math.max(next, index - WINDOW_SIZE + 1), index)
+    next = Math.min(Math.max(next, index - size + 1), index)
   }
-  return Math.min(Math.max(next, 0), Math.max(0, length - WINDOW_SIZE))
+  return Math.min(Math.max(next, 0), Math.max(0, length - size))
 }
 
 // A page move from the window drawn over the item at `index`: the new start,
@@ -350,8 +408,91 @@ export function pageFor(
   start: number,
   index: number,
   step: 1 | -1,
+  size: number,
 ): { start: number; index: number } | null {
-  const drawn = windowFor(length, start, index)
-  const next = windowFor(length, drawn + step * WINDOW_SIZE, -1)
+  const drawn = windowFor(length, start, index, size)
+  const next = windowFor(length, drawn + step * size, -1, size)
   return next === drawn ? null : { start: next, index: index + next - drawn }
+}
+
+// How many items fit in `rows` rows from `start` on, with the `<n> more` row
+// when items come after them; at least 1 for a nonempty list.
+function rowsFit(heights: readonly number[], start: number, rows: number): number {
+  let used = 0
+  let count = 0
+  for (let i = start; i < heights.length; i += 1) {
+    used += heights[i]!
+    if (used + (i + 1 < heights.length ? 1 : 0) > rows) {
+      break
+    }
+    count += 1
+  }
+  return Math.max(1, count)
+}
+
+// The row-based window: `heights` holds each item's rows, `rows` the rows left
+// for items once the view's other lines are taken out, apart from the `<n> more`
+// row, which this reserves while items come after the window. From `start` it
+// moves the least distance that shows the whole item at `index` (-1 for none),
+// then, when the window reaches the last item, pulls up while earlier items
+// still fit.
+export function rowWindow(
+  heights: readonly number[],
+  start: number,
+  index: number,
+  rows: number,
+): { start: number; count: number } {
+  if (heights.length === 0) {
+    return { start: 0, count: 0 }
+  }
+  let next = Math.min(Math.max(start, 0), heights.length - 1)
+  if (index !== -1) {
+    next = Math.min(next, index)
+    while (index >= next + rowsFit(heights, next, rows)) {
+      next += 1
+    }
+  }
+  let count = rowsFit(heights, next, rows)
+  if (next + count >= heights.length) {
+    let used = heights.slice(next).reduce((sum, height) => sum + height, 0)
+    while (next > 0 && used + heights[next - 1]! <= rows) {
+      next -= 1
+      used += heights[next]!
+    }
+    count = rowsFit(heights, next, rows)
+  }
+  return { start: next, count }
+}
+
+// A page move over row heights, from the window drawn around the item at
+// `index`: the next window starts at the first item after the current one and
+// the previous one ends just before the current start. The focus keeps its
+// offset in the window, clamped to the new window's items. Null when the window
+// cannot move.
+export function pageRows(
+  heights: readonly number[],
+  start: number,
+  index: number,
+  step: 1 | -1,
+  rows: number,
+): { start: number; index: number } | null {
+  const drawn = rowWindow(heights, start, index, rows)
+  let next = drawn.start
+  if (step === 1) {
+    const after = drawn.start + drawn.count
+    next = after >= heights.length ? next : rowWindow(heights, after, -1, rows).start
+  } else if (next > 0) {
+    next -= 1
+    let used = heights[next]!
+    // The window ends before the current start, so the `<n> more` row follows it.
+    while (next > 0 && used + heights[next - 1]! + 1 <= rows) {
+      next -= 1
+      used += heights[next]!
+    }
+  }
+  if (next === drawn.start) {
+    return null
+  }
+  const { count } = rowWindow(heights, next, -1, rows)
+  return { start: next, index: next + Math.min(index - drawn.start, count - 1) }
 }

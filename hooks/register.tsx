@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { PendingTurn, ReviewTurn, TodoItem, TodoListState, TrashEntry } from '../types'
+import type { PendingTurn, ReviewTurn, TodoItem, TodoListState, TrashEntry, ViewKind } from '../types'
 import {
   MAX_TRASH,
   REVIEW_MIN_ITEMS,
@@ -14,6 +14,8 @@ import {
   applyChanges,
   applyRefresh,
   applyReview,
+  cellWidth,
+  charWidth,
   cleanItems,
   isItem,
   incrementalPrompt,
@@ -24,8 +26,12 @@ import {
   renderTranscript,
   removedTitles,
   pageFor,
+  pageRows,
   reviewPrompt,
+  rowWindow,
   windowFor,
+  windowSize,
+  wrapRows,
 } from './list'
 import {
   STORE_CAP,
@@ -59,11 +65,13 @@ const DELETE_KEY = 'd'
 // Not hotkeys: Enter presses the focused row's Button, which shows its detail.
 const ENTER_KEY = 'Enter'
 const LEAVE_KEY = 'Esc'
-// Characters the terminal draws two cells wide: CJK, Hangul, and full-width forms.
-const WIDE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/
-
-const charWidth = (ch: string) => (WIDE.test(ch) ? 2 : 1)
-const cellWidth = (text: string) => [...text].reduce((n, ch) => n + charWidth(ch), 0)
+// Switches between the band and the pane.
+const TOGGLE_KEY = 't'
+const PANE_ID = 'todos'
+const PANE_TITLE = 'Todos'
+// The /config row of the plugin's `default_view` userConfig field.
+const DEFAULT_VIEW_KEY = 'todo-list.default_view'
+const NO_DETAIL = '(No detail. Run /todos refresh to add one.)'
 
 // The longest start of `text` that fits in `cells`, with an ellipsis.
 function fit(text: string, cells: number): string {
@@ -109,6 +117,20 @@ const selected = atom({ plugin: 'todo-list', key: 'selected' } as const, [] as s
 // The index of the window's first item. Like the focus, it lasts only while the
 // band holds the focus.
 const windowStart = atom({ plugin: 'todo-list', key: 'windowStart' } as const, 0)
+// The pane's own copies of the five band atoms above, plus the position of the
+// item it last focused. They last until the pane closes.
+const paneFocused = atom({ plugin: 'todo-list', key: 'paneFocused' } as const, '')
+const paneFocusIndex = atom({ plugin: 'todo-list', key: 'paneFocusIndex' } as const, 0)
+const paneDetailed = atom({ plugin: 'todo-list', key: 'paneDetailed' } as const, '')
+const paneDeleting = atom({ plugin: 'todo-list', key: 'paneDeleting' } as const, '')
+const paneSelected = atom({ plugin: 'todo-list', key: 'paneSelected' } as const, [] as string[])
+const paneWindowStart = atom({ plugin: 'todo-list', key: 'paneWindowStart' } as const, 0)
+// Which view shows the list. Session-only: never written to the store. The band
+// draws nothing in pane mode.
+const mode = atom({ plugin: 'todo-list', key: 'mode' } as const, 'band' as ViewKind)
+// Whether this process has applied the default view yet. It lives in $.state so
+// a hot reload, which runs session.start again, does not reapply it.
+const viewApplied = atom({ plugin: 'todo-list', key: 'viewApplied' } as const, false)
 // The last main-loop answer, which the next user message often replies to.
 const lastAnswer = atom({ plugin: 'todo-list', key: 'lastAnswer' } as const, '')
 // Finished turns not yet applied. They live in $.state, not the module, because
@@ -177,18 +199,112 @@ let isWatchingLeave = false
 const pickedFrom = (list: readonly TodoItem[], titles: readonly string[]) =>
   list.filter(one => titles.includes(one.title))
 
-async function setSelected($: EngineInterface, next: string[]) {
+// A view's atom, reached through closures over `$`: the engine's state scan
+// reads only atoms named directly in a `read` or `update` call, and refuses `$`
+// passed as an argument.
+type Slot<T> = {
+  get: () => Promise<T>
+  set: (next: (current: T) => T) => Promise<unknown>
+}
+
+type Slots = {
+  focused: Slot<string>
+  detailed: Slot<string>
+  deleting: Slot<string>
+  selected: Slot<string[]>
+  windowStart: Slot<number>
+}
+
+// What the actions act on: the band or the pane, each with its own atoms.
+type View = Slots & {
+  kind: ViewKind
+  // The site the focus ring moves on.
+  requestId: string
+  // The pane only: where its focus last stood.
+  focusIndex?: Slot<number>
+}
+
+const bandSlots = ($: EngineInterface): Slots => ({
+  focused: { get: () => read($, focused), set: next => update($, focused, next) },
+  detailed: { get: () => read($, detailed), set: next => update($, detailed, next) },
+  deleting: { get: () => read($, deleting), set: next => update($, deleting, next) },
+  selected: { get: () => read($, selected), set: next => update($, selected, next) },
+  windowStart: { get: () => read($, windowStart), set: next => update($, windowStart, next) },
+})
+
+const bandView = ($: EngineInterface, requestId: string): View => ({ ...bandSlots($), kind: 'band', requestId })
+
+const paneView = ($: EngineInterface): View => ({
+  kind: 'pane',
+  requestId: PANE_ID,
+  focused: { get: () => read($, paneFocused), set: next => update($, paneFocused, next) },
+  detailed: { get: () => read($, paneDetailed), set: next => update($, paneDetailed, next) },
+  deleting: { get: () => read($, paneDeleting), set: next => update($, paneDeleting, next) },
+  selected: { get: () => read($, paneSelected), set: next => update($, paneSelected, next) },
+  windowStart: { get: () => read($, paneWindowStart), set: next => update($, paneWindowStart, next) },
+  focusIndex: { get: () => read($, paneFocusIndex), set: next => update($, paneFocusIndex, next) },
+})
+
+// The window size each view last drew. Key handlers cannot see the rows a
+// render was given.
+const drawnSizes = new Map<View['kind'], number>()
+const sizeOf = (view: View) => drawnSizes.get(view.kind) ?? WINDOW_SIZE
+
+// What the pane last drew, for its row-based window: each item's title rows,
+// the rows its detail would take expanded, and the rows left for items.
+type PaneDrawn = { titles: number[]; details: number[]; rows: number }
+// Until the pane draws, a window of the band's size and the `<n> more` row.
+let paneDrawn: PaneDrawn = { titles: [], details: [], rows: WINDOW_SIZE + 1 }
+
+// Item heights with the detail expanded on the item titled `expandedTitle` ('' for none).
+// An item past the drawn list counts as one row.
+const paneHeights = (list: readonly TodoItem[], expandedTitle: string) =>
+  list.map((one, i) => (paneDrawn.titles[i] ?? 1) + (one.title === expandedTitle ? (paneDrawn.details[i] ?? 0) : 0))
+
+// Whether a turn is running, as the band last saw it. The pane gets no such prop.
+let isWorking = false
+// Whether the pane held the keys when it last drew.
+let isPaneHeld = false
+
+// The index of the item holding the focus, -1 for none. The pane also keeps the
+// position it last focused, so an item that left the list hands the focus to
+// the one now there.
+function resolveFocus(list: readonly TodoItem[], title: string, stored?: number): number {
+  const index = list.findIndex(one => one.title === title)
+  return index !== -1 || title === '' || stored === undefined ? index : Math.min(stored, list.length - 1)
+}
+
+async function focusOf(view: View, list: readonly TodoItem[]): Promise<number> {
+  const [title, stored] = await Promise.all([view.focused.get(), view.focusIndex?.get()])
+  return resolveFocus(list, title, stored)
+}
+
+async function setSelected(view: Pick<View, 'selected'>, next: string[]) {
   const same = (list: string[]) => list.length === next.length && list.every((title, i) => title === next[i])
-  if (!same(await read($, selected))) {
-    await update($, selected, () => next)
+  if (!same(await view.selected.get())) {
+    await view.selected.set(() => next)
   }
 }
 
-async function disarm($: EngineInterface) {
-  if ((await read($, deleting)) !== '') {
-    await update($, deleting, () => '')
+async function disarm(view: Pick<View, 'deleting'>) {
+  if ((await view.deleting.get()) !== '') {
+    await view.deleting.set(() => '')
   }
 }
+
+async function clearPane($: EngineInterface) {
+  isPaneHeld = false
+  await Promise.all([
+    update($, paneFocused, () => ''),
+    update($, paneFocusIndex, () => 0),
+    update($, paneDetailed, () => ''),
+    update($, paneDeleting, () => ''),
+    update($, paneSelected, () => []),
+    update($, paneWindowStart, () => 0),
+  ])
+}
+
+const closePane = ($: EngineInterface) => $.ui.close({ id: PANE_ID })
 
 // The dot, the selection, a pending delete, the detail view, and the window's
 // position last only while the band holds the focus.
@@ -203,8 +319,9 @@ async function leave($: EngineInterface) {
   if (shown !== '') {
     await update($, detailed, () => '')
   }
-  await setSelected($, [])
-  await disarm($)
+  const view = bandSlots($)
+  await setSelected(view, [])
+  await disarm(view)
 }
 
 // The band raises no event when the person leaves it with Esc. While the dot
@@ -375,49 +492,52 @@ async function insertQuote($: EngineInterface, quoted: string): Promise<boolean>
 }
 
 // Pastes the selected items, or the focused one when nothing is selected, each
-// numbered as in the band.
-async function paste($: EngineInterface) {
-  await disarm($)
-  const [list, target, titles] = await Promise.all([read($, items), read($, focused), read($, selected)])
+// numbered as in the list.
+async function paste($: EngineInterface, view: View) {
+  await disarm(view)
+  const [list, titles] = await Promise.all([read($, items), view.selected.get()])
+  const target = list[await focusOf(view, list)]
   let picked = pickedFrom(list, titles)
-  if (picked.length === 0) {
-    picked = list.filter(one => one.title === target)
+  if (picked.length === 0 && target !== undefined) {
+    picked = [target]
   }
   if (picked.length === 0) {
     return
   }
   // A failed paste keeps the selection for the retry the toast asks for.
   if (await insertQuote($, quoteItems(list, picked))) {
-    await setSelected($, [])
+    await setSelected(view, [])
   }
 }
 
-async function toggleSelected($: EngineInterface) {
-  await disarm($)
-  const [list, target, titles] = await Promise.all([read($, items), read($, focused), read($, selected)])
-  if (!list.some(one => one.title === target)) {
+async function toggleSelected($: EngineInterface, view: View) {
+  await disarm(view)
+  const [list, titles] = await Promise.all([read($, items), view.selected.get()])
+  const target = list[await focusOf(view, list)]?.title
+  if (target === undefined) {
     return
   }
   const rest = pickedFrom(list, titles).map(one => one.title)
-  await setSelected($, rest.includes(target) ? rest.filter(title => title !== target) : [...rest, target])
+  await setSelected(view, rest.includes(target) ? rest.filter(title => title !== target) : [...rest, target])
 }
 
-async function toggleAll($: EngineInterface) {
-  await disarm($)
-  const [list, titles] = await Promise.all([read($, items), read($, selected)])
+async function toggleAll($: EngineInterface, view: View) {
+  await disarm(view)
+  const [list, titles] = await Promise.all([read($, items), view.selected.get()])
   if (list.length === 0) {
     return
   }
   const isAll = pickedFrom(list, titles).length === list.length
-  await setSelected($, isAll ? [] : list.map(one => one.title))
+  await setSelected(view, isAll ? [] : list.map(one => one.title))
 }
 
 // Asks the built-in /btw about the focused item. It is not awaited: /btw
 // resolves only once it has run, which waits for the turn in progress to end.
-async function askAbout($: EngineInterface, isWorking: boolean) {
-  await disarm($)
-  const target = await read($, focused)
-  if (!(await read($, items)).some(one => one.title === target)) {
+async function askAbout($: EngineInterface, view: View) {
+  await disarm(view)
+  const list = await read($, items)
+  const target = list[await focusOf(view, list)]?.title
+  if (target === undefined) {
     return
   }
   const args = `Tell me more about this open item from our conversation: "${target}". What is it, why is it still open, and what would close it? Answer in the language of the conversation.`
@@ -429,83 +549,108 @@ async function askAbout($: EngineInterface, isWorking: boolean) {
   }
 }
 
-// Puts the dot on an item. A delete armed on another item is cancelled, the
-// detail view walks from one item's detail to the next, and the window scrolls
-// just far enough to show the item.
-async function focusItem($: EngineInterface, title: string) {
-  const [list, current, shownTitle, armed, start] = await Promise.all([
+async function setFocus(view: View, title: string, index: number) {
+  if ((await view.focused.get()) !== title) {
+    await view.focused.set(() => title)
+  }
+  if (view.focusIndex !== undefined && (await view.focusIndex.get()) !== index) {
+    await view.focusIndex.set(() => index)
+  }
+}
+
+// Puts the dot on the item at `index`. A delete armed on another item is
+// cancelled, the detail view walks from one item's detail to the next, and the
+// window scrolls just far enough to show the item.
+async function focusItem($: EngineInterface, view: View, index: number) {
+  const [list, shownTitle, armed, start] = await Promise.all([
     read($, items),
-    read($, focused),
-    read($, detailed),
-    read($, deleting),
-    read($, windowStart),
+    view.detailed.get(),
+    view.deleting.get(),
+    view.windowStart.get(),
   ])
-  if (current !== title) {
-    await update($, focused, () => title)
+  const item = list[index]
+  if (item === undefined) {
+    return
   }
+  const current = await focusOf(view, list)
+  await setFocus(view, item.title, index)
   // Start from the window as drawn, which clamps a stale start.
-  const drawn = windowFor(list.length, start, list.findIndex(one => one.title === current))
-  const scrolled = windowFor(list.length, drawn, list.findIndex(one => one.title === title))
+  let scrolled: number
+  if (view.kind === 'pane') {
+    // The expansion moves with the focus, so the heights differ before and after.
+    const { rows } = paneDrawn
+    const drawn = rowWindow(paneHeights(list, shownTitle), start, current, rows)
+    scrolled = rowWindow(paneHeights(list, shownTitle === '' ? '' : item.title), drawn.start, index, rows).start
+  } else {
+    const size = sizeOf(view)
+    scrolled = windowFor(list.length, windowFor(list.length, start, current, size), index, size)
+  }
   if (scrolled !== start) {
-    await update($, windowStart, () => scrolled)
+    await view.windowStart.set(() => scrolled)
   }
-  if (armed !== '' && armed !== title) {
-    await update($, deleting, () => '')
+  if (armed !== '' && armed !== item.title) {
+    await view.deleting.set(() => '')
   }
-  if (shownTitle !== '' && shownTitle !== title) {
-    await update($, detailed, () => title)
+  if (shownTitle !== '' && shownTitle !== item.title) {
+    await view.detailed.set(() => item.title)
   }
 }
 
 // Moves the ring to the next or previous row, wrapping around as Tab does. The
 // move skips this plugin's own ui.focus hook, so the dot moves here; left
 // behind, the leave check would pull the ring back to the old row.
-async function moveFocus($: EngineInterface, requestId: string, step: 1 | -1) {
-  const [list, current] = await Promise.all([read($, items), read($, focused)])
-  const index = list.findIndex(one => one.title === current)
+async function moveFocus($: EngineInterface, view: View, step: 1 | -1) {
+  const list = await read($, items)
+  const index = await focusOf(view, list)
   if (index === -1) {
     return
   }
   const target = (index + step + list.length) % list.length
-  const { deny } = await $.ui.focus({ requestId, key: `${ROW_PREFIX}${target}` })
+  const { deny } = await $.ui.focus({ requestId: view.requestId, key: `${ROW_PREFIX}${target}` })
   if (deny === undefined) {
-    await focusItem($, list[target]!.title)
+    await focusItem($, view, target)
   }
 }
 
 // Moves the window a page down or up, and the focus with it so the focus keeps
 // its row. Like moveFocus, it moves the ring itself.
-async function movePage($: EngineInterface, requestId: string, step: 1 | -1) {
-  const [list, current, start, shownTitle] = await Promise.all([
-    read($, items),
-    read($, focused),
-    read($, windowStart),
-    read($, detailed),
-  ])
-  const index = list.findIndex(one => one.title === current)
-  const page = shownTitle === '' && index !== -1 ? pageFor(list.length, start, index, step) : null
+async function movePage($: EngineInterface, view: View, step: 1 | -1) {
+  const [list, start, shownTitle] = await Promise.all([read($, items), view.windowStart.get(), view.detailed.get()])
+  const index = await focusOf(view, list)
+  // The band's detail replaces the list; the pane's sits inside it.
+  const canPage = index !== -1 && (view.kind === 'pane' || shownTitle === '')
+  let page: { start: number; index: number } | null = null
+  if (canPage && view.kind === 'pane') {
+    page = pageRows(paneHeights(list, shownTitle), start, index, step, paneDrawn.rows)
+  } else if (canPage) {
+    page = pageFor(list.length, start, index, step, sizeOf(view))
+  }
   if (page === null) {
     return
   }
-  const { deny } = await $.ui.focus({ requestId, key: `${ROW_PREFIX}${page.index}` })
+  const { deny } = await $.ui.focus({ requestId: view.requestId, key: `${ROW_PREFIX}${page.index}` })
   if (deny === undefined) {
     // focusItem scrolls the least distance from the old focus, so the page's
     // own start is set after it.
-    await focusItem($, list[page.index]!.title)
-    await update($, windowStart, () => page.start)
+    await focusItem($, view, page.index)
+    if ((await view.windowStart.get()) !== page.start) {
+      await view.windowStart.set(() => page.start)
+    }
   }
 }
 
-// Switches the band between the list and the focused item's detail.
-async function toggleDetails($: EngineInterface) {
-  await disarm($)
-  if ((await read($, detailed)) !== '') {
-    await update($, detailed, () => '')
+// Switches the band between the list and the focused item's detail, or the
+// pane's detail under the focused item.
+async function toggleDetails($: EngineInterface, view: View) {
+  await disarm(view)
+  if ((await view.detailed.get()) !== '') {
+    await view.detailed.set(() => '')
     return
   }
-  const target = await read($, focused)
-  if ((await read($, items)).some(one => one.title === target)) {
-    await update($, detailed, () => target)
+  const list = await read($, items)
+  const target = list[await focusOf(view, list)]?.title
+  if (target !== undefined) {
+    await view.detailed.set(() => target)
   }
 }
 
@@ -513,21 +658,23 @@ async function toggleDetails($: EngineInterface) {
 // focus to the next item, or the previous one after the last. The ring tracks
 // its stop by position, so after the last row goes it may stand on a hotkey
 // Button; the leave check puts it back on the focused row.
-async function deleteFocused($: EngineInterface) {
-  const [list, target] = await Promise.all([read($, items), read($, focused)])
-  const index = list.findIndex(one => one.title === target)
-  if (index === -1) {
+async function deleteFocused($: EngineInterface, view: View) {
+  const list = await read($, items)
+  const index = await focusOf(view, list)
+  const target = list[index]?.title
+  if (target === undefined) {
     return
   }
-  if ((await read($, deleting)) !== target) {
-    await update($, deleting, () => target)
+  if ((await view.deleting.get()) !== target) {
+    await view.deleting.set(() => target)
     return
   }
   await tick($, [target])
-  await disarm($)
+  await disarm(view)
+  const nextIndex = list[index + 1] === undefined ? index - 1 : index
   const title = (list[index + 1] ?? list[index - 1])?.title ?? ''
-  await update($, focused, () => title)
-  await update($, detailed, shown => (shown === '' ? '' : title))
+  await setFocus(view, title, Math.max(0, nextIndex))
+  await view.detailed.set(shown => (shown === '' ? '' : title))
 }
 
 // Resolves to the new list, or null when the list was left as it was. `sent`
@@ -639,24 +786,28 @@ const schedulePending = ($: EngineInterface) => {
   })
 }
 
-// The band's own keys work only while it holds the focus.
-function helpLine(
-  isFocused: boolean,
-  isArmed: boolean,
-  isDetailed: boolean,
-  selectedCount: number,
-  itemTotal: number,
-): string {
-  if (!isFocused) {
+// The keys work only while the view holds the focus.
+function helpLine(view: {
+  kind: View['kind']
+  isHeld: boolean
+  isArmed: boolean
+  isDetailed: boolean
+  selectedCount: number
+  hasPages: boolean
+}): string {
+  if (!view.isHeld) {
     return 'Ctrl+X Tab to focus'
   }
-  if (isArmed) {
+  if (view.isArmed) {
     return `${DELETE_KEY} confirm delete · ${LEAVE_KEY} cancel`
   }
-  const pasting = selectedCount > 0 ? `${PASTE_KEY} paste ${selectedCount}` : `${PASTE_KEY} paste`
-  const toggle = isDetailed ? 'list' : 'details'
-  const paging = itemTotal > WINDOW_SIZE && !isDetailed ? ` · ${NEXT_PAGE_KEY}/${PREVIOUS_PAGE_KEY} page` : ''
-  return `${NEXT_KEY}/${PREVIOUS_KEY} move${paging} · ${SELECT_KEY} select · ${SELECT_ALL_KEY} select all · ${pasting} · ${DETAILS_KEY}/${ENTER_KEY} show ${toggle} · ${ASK_KEY} ask /btw · ${DELETE_KEY} delete · ${LEAVE_KEY} leave`
+  const isPane = view.kind === 'pane'
+  const pasting = view.selectedCount > 0 ? `${PASTE_KEY} paste ${view.selectedCount}` : `${PASTE_KEY} paste`
+  const toggle = isPane ? (view.isDetailed ? 'collapse' : 'expand') : view.isDetailed ? 'show list' : 'show details'
+  // The band's detail replaces the list, so there is nothing to page.
+  const paging = view.hasPages && (isPane || !view.isDetailed) ? ` · ${NEXT_PAGE_KEY}/${PREVIOUS_PAGE_KEY} page` : ''
+  const switching = ` · ${TOGGLE_KEY} ${isPane ? 'band' : 'pane'}`
+  return `${NEXT_KEY}/${PREVIOUS_KEY} move${paging} · ${SELECT_KEY} select · ${SELECT_ALL_KEY} select all · ${pasting}${switching} · ${DETAILS_KEY}/${ENTER_KEY} ${toggle} · ${ASK_KEY} ask /btw · ${DELETE_KEY} delete · ${LEAVE_KEY} leave`
 }
 
 const itemCount = (n: number) => `${n} ${n === 1 ? 'item' : 'items'}`
@@ -787,13 +938,141 @@ async function sweep($: EngineInterface, currentId: string): Promise<SavedKey | 
   return kept.find(one => one.id === currentId) ?? null
 }
 
+type Elements = ReturnType<EngineInterface['ui']['resolve']>
+
+// Opening an open pane only retitles it, but its focus request is still
+// granted from an empty prompt, which hands the keys to the pane. The band
+// hides only once the pane is drawn, so the list always has a view. An open
+// nobody asked for takes no keys: they would turn the first letters typed into
+// the pane's hotkeys.
+async function openPane($: EngineInterface, takesKeys = true): Promise<boolean> {
+  const { isPlaced } = await $.ui.open({ id: PANE_ID, title: PANE_TITLE, ...(takesKeys && { focus: true as const }) })
+  if (isPlaced) {
+    await update($, mode, () => 'pane')
+  }
+  return isPlaced
+}
+
+// The `default_view` setting; band for a missing or unreadable row.
+async function defaultView($: EngineInterface): Promise<ViewKind> {
+  try {
+    const row = (await $.config.list()).find(one => one.key === DEFAULT_VIEW_KEY)
+    return row?.value === 'pane' ? 'pane' : 'band'
+  } catch {
+    return 'band'
+  }
+}
+
+// A view's window and its help line, drawn to fit. The help line wraps and names
+// the paging keys only when the list does not fit, so it is drawn once without
+// them and, if the list still does not fit, again with. `fit` gets the rows the
+// view's lines take apart from the items, and answers the window.
+function fitWindow<W extends { count: number }>(view: {
+  columns: number
+  length: number
+  // The rows the view's own lines take apart from the help line and the items.
+  fixedRows: number
+  helpFor: (hasPages: boolean) => string
+  fit: (others: number) => W
+}): { window: W; help: string } {
+  const attempt = (hasPages: boolean) => {
+    const help = view.helpFor(hasPages)
+    return { help, window: view.fit(view.fixedRows + wrapRows(`${GUTTER}${help}`, view.columns)) }
+  }
+  const whole = attempt(false)
+  return view.length > whole.window.count ? attempt(true) : whole
+}
+
+// The rows a title takes beyond its first once the focused item shows it whole.
+const extraTitleRows = (title: string | undefined, columns: number, numberWidth: number) =>
+  title === undefined ? 0 : wrapRows(normalizeParens(title), columns - GUTTER.length - numberWidth) - 1
+
+// One item's row, drawn by the band and the pane alike. The focus ring tracks
+// its stop by position, so a hidden row keeps its Button.
+function itemRow(
+  { Box, Button, Text }: Elements,
+  row: {
+    item: TodoItem
+    index: number
+    numberWidth: number
+    columns: number
+    isShown: boolean
+    // Whether the focus dot is drawn.
+    isFocused: boolean
+    // Whether the title is drawn whole instead of cut to one row.
+    isWhole: boolean
+    isPicked: boolean
+    isArmed: boolean
+    autoFocus?: true
+    onPress: () => void
+  },
+) {
+  const button = (
+    <Button key={`${ROW_PREFIX}${row.index}`} label=" " plain autoFocus={row.autoFocus} onPress={row.onPress} />
+  )
+  if (!row.isShown) {
+    return (
+      <Box key={`row-${row.index}`} width={0} height={0} overflow="hidden">
+        {button}
+      </Box>
+    )
+  }
+  // Items stored before parentheses were normalized still need normalizing here.
+  const shown = normalizeParens(row.item.title)
+  const [, main = shown] = NOTE.exec(shown) ?? []
+  const room = row.columns - GUTTER.length - row.numberWidth
+  const color = row.isPicked ? SELECTED_COLOR : undefined
+  const isLong = !row.isWhole && cellWidth(shown) > room
+  // The cut may end inside the note.
+  const cut = isLong ? fit(shown, room) : shown
+  const head = cut.slice(0, main.length)
+  const tail = cut.slice(main.length)
+  return (
+    <Box key={`row-${row.index}`} flexDirection="row">
+      {/* The focus ring always inverts a Button, so the row's Button takes
+          no cells and the dot beside it marks the focus instead. */}
+      <Box width={0} overflow="hidden">
+        {button}
+      </Box>
+      <Text>{row.isFocused ? '• ' : '  '}</Text>
+      <Text color={color}>{numberLabel(row.index + 1, row.numberWidth)}</Text>
+      <Text color={color} wrap={isLong ? 'truncate-end' : 'wrap'}>
+        {head}
+        {tail !== '' && <Text dimColor>{tail}</Text>}
+      </Text>
+      {row.isArmed && (
+        <Text weight="semibold" color={DELETE_COLOR}>
+          {' '}
+          delete?
+        </Text>
+      )}
+    </Box>
+  )
+}
+
+// The hidden hotkey Buttons both views bind to their own view.
+function keyButtons($: EngineInterface, { Button }: Elements, view: View) {
+  return [
+    <Button key="next" label="next" hotkey={NEXT_KEY} plain onPress={() => moveFocus($, view, 1)} />,
+    <Button key="previous" label="previous" hotkey={PREVIOUS_KEY} plain onPress={() => moveFocus($, view, -1)} />,
+    <Button key="details" label="details" hotkey={DETAILS_KEY} plain onPress={() => toggleDetails($, view)} />,
+    <Button key="next-page" label="next page" hotkey={NEXT_PAGE_KEY} plain onPress={() => movePage($, view, 1)} />,
+    <Button key="previous-page" label="previous page" hotkey={PREVIOUS_PAGE_KEY} plain onPress={() => movePage($, view, -1)} />,
+    <Button key="paste" label="paste" hotkey={PASTE_KEY} plain onPress={() => paste($, view)} />,
+    <Button key="select" label="select" hotkey={SELECT_KEY} plain onPress={() => toggleSelected($, view)} />,
+    <Button key="select-all" label="select all" hotkey={SELECT_ALL_KEY} plain onPress={() => toggleAll($, view)} />,
+    <Button key="ask" label="ask" hotkey={ASK_KEY} plain onPress={() => askAbout($, view)} />,
+    <Button key="delete" label="delete" hotkey={DELETE_KEY} plain onPress={() => deleteFocused($, view)} />,
+  ]
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'todos',
       description:
-        'Show, refresh, clear or reset the open items list, delete some, list, restore or purge removed items, or send them all with a prompt',
-      argumentHint: '[refresh|clear|reset|trash|restore <numbers>|purge <numbers>|delete <numbers>|<prompt>]',
+        'Show, refresh, clear or reset the open items list, open it in a pane, delete some, list, restore or purge removed items, or send them all with a prompt',
+      argumentHint: '[refresh|clear|pane|reset|trash|restore <numbers>|purge <numbers>|delete <numbers>|<prompt>]',
     })
 
     const id = await $.session.id()
@@ -814,6 +1093,15 @@ export const register: Register = on => {
       }
     }
 
+    // Only the first start of the process applies the default view: a reload
+    // runs this hook again, and /clear fires no start at all.
+    if (!(await read($, viewApplied))) {
+      await update($, viewApplied, () => true)
+      if ((await defaultView($)) === 'pane') {
+        await openPane($, false)
+      }
+    }
+
     return next(e)
   })
 
@@ -829,6 +1117,7 @@ export const register: Register = on => {
       await update($, detailed, () => '')
       await update($, deleting, () => '')
       await update($, selected, () => [])
+      await clearPane($)
       await update($, savedKey, () => '')
       for (const key of await $.store.keys()) {
         if ((parseKey(key)?.id ?? legacyId(key)) === e.sessionId) {
@@ -879,6 +1168,9 @@ export const register: Register = on => {
     if (arg === 'refresh') {
       const gen = generation
       return { text: await enqueue(() => refresh($, gen)) }
+    }
+    if (arg === 'pane') {
+      return { text: (await openPane($)) ? 'The Todos pane is open.' : 'The Todos pane cannot be shown here.' }
     }
     if (arg === 'clear') {
       await enqueue(async () => tick($, (await read($, items)).map(one => one.title)))
@@ -998,6 +1290,7 @@ export const register: Register = on => {
     if (e.plugin !== 'todo-list') {
       return next(e)
     }
+    const view = bandView($, e.requestId)
     const [list, current] = await Promise.all([read($, items), read($, focused)])
     const last = list.length - 1
     let index = Number(e.element.slice(ROW_PREFIX.length))
@@ -1008,18 +1301,21 @@ export const register: Register = on => {
     if (!e.element.startsWith(ROW_PREFIX)) {
       index = list[last]?.title === current ? 0 : last
     }
-    const item = list[index]
-    if (item === undefined) {
+    if (list[index] === undefined) {
       return next(e)
     }
-    await focusItem($, item.title)
+    await focusItem($, view, index)
     watchLeave($, e.requestId)
 
     return next({ ...e, element: `${ROW_PREFIX}${index}` })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const [list, current, openTitle, armed, selectedTitles, storedStart] = await Promise.all([
+    // Recorded before any early return, so the pane's ask key sees it even
+    // while the band draws nothing.
+    isWorking = e.props.isWorking
+    const [isPaneMode, list, current, openTitle, armed, selectedTitles, storedStart] = await Promise.all([
+      read($, mode).then(one => one === 'pane'),
       read($, items),
       read($, focused),
       read($, detailed),
@@ -1028,69 +1324,59 @@ export const register: Register = on => {
       read($, windowStart),
     ])
     const picked = pickedFrom(list, selectedTitles)
-    const { isWorking } = e.props
     // While one item's detail is shown, the band shows that item alone.
     const opened = list.find(one => one.title === openTitle)
-    if (list.length === 0 || e.props.hasSurvey) {
+    if (isPaneMode || list.length === 0 || e.props.hasSurvey) {
       return next(e)
     }
 
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Text } = ui
+    const view = bandView($, e.requestId)
+    const { bodyColumns: columns } = e.props
     const numberWidth = labelWidth(list.length)
-    const first = windowFor(list.length, storedStart, list.findIndex(one => one.title === current))
-    const after = Math.max(0, list.length - first - WINDOW_SIZE)
+    const focusIndex = resolveFocus(list, current)
+    const {
+      window: { count: size },
+      help,
+    } = fitWindow({
+      columns,
+      length: list.length,
+      // The rule and the heading.
+      fixedRows: 2 + extraTitleRows(list[focusIndex]?.title, columns, numberWidth),
+      fit: others => ({ count: windowSize(e.props.maxRows, list.length, others, WINDOW_SIZE) }),
+      helpFor: hasPages =>
+        helpLine({
+          kind: 'band',
+          isHeld: current !== '',
+          isArmed: armed !== '',
+          isDetailed: opened !== undefined,
+          selectedCount: picked.length,
+          hasPages,
+        }),
+    })
+    drawnSizes.set('band', size)
+    const first = windowFor(list.length, storedStart, focusIndex, size)
+    const after = Math.max(0, list.length - first - size)
 
     return (
       <Box flexDirection="column">
-        <Text dimColor>{'─'.repeat(e.props.bodyColumns)}</Text>
+        <Text dimColor>{'─'.repeat(columns)}</Text>
         <Text weight="semibold">{GUTTER}Todos</Text>
         {list.map((item, i) => {
-          // The focus ring tracks its stop by position, so every row keeps its
-          // Button in every view; dropping the hidden rows' Buttons would slide
-          // the ring onto the next stop, the first hotkey Button.
-          const button = (
-            <Button key={`${ROW_PREFIX}${i}`} label=" " plain onPress={() => toggleDetails($)} />
-          )
-          const isHidden = opened !== undefined ? item !== opened : i < first || i >= first + WINDOW_SIZE
-          if (isHidden) {
-            return (
-              <Box key={`row-${i}`} width={0} height={0} overflow="hidden">
-                {button}
-              </Box>
-            )
-          }
-          // Items stored before parentheses were normalized still need normalizing here.
-          const shown = normalizeParens(item.title)
-          const [, main = shown] = NOTE.exec(shown) ?? []
-          const room = e.props.bodyColumns - GUTTER.length - numberWidth
           const isFocused = item.title === current
-          const color = picked.includes(item) ? SELECTED_COLOR : undefined
-          const isLong = !isFocused && opened === undefined && cellWidth(shown) > room
-          // The cut may end inside the note.
-          const cut = isLong ? fit(shown, room) : shown
-          const head = cut.slice(0, main.length)
-          const tail = cut.slice(main.length)
-          return (
-            <Box key={`row-${i}`} flexDirection="row">
-              {/* The focus ring always inverts a Button, so the row's Button takes
-                  no cells and the dot beside it marks the focus instead. */}
-              <Box width={0} overflow="hidden">
-                {button}
-              </Box>
-              <Text>{isFocused ? '• ' : '  '}</Text>
-              <Text color={color}>{numberLabel(i + 1, numberWidth)}</Text>
-              <Text color={color} wrap={isLong ? 'truncate-end' : 'wrap'}>
-                {head}
-                {tail !== '' && <Text dimColor>{tail}</Text>}
-              </Text>
-              {item.title === armed && (
-                <Text weight="semibold" color={DELETE_COLOR}>
-                  {' '}
-                  delete?
-                </Text>
-              )}
-            </Box>
-          )
+          return itemRow(ui, {
+            item,
+            index: i,
+            numberWidth,
+            columns,
+            isShown: opened !== undefined ? item === opened : i >= first && i < first + size,
+            isFocused,
+            isWhole: isFocused || opened !== undefined,
+            isPicked: picked.includes(item),
+            isArmed: item.title === armed,
+            onPress: () => toggleDetails($, view),
+          })
         })}
         {opened === undefined && after > 0 && (
           <Text dimColor>
@@ -1101,29 +1387,174 @@ export const register: Register = on => {
         {opened !== undefined && (
           <Box flexDirection="row">
             <Text>{' '.repeat(GUTTER.length + numberWidth)}</Text>
-            <Text wrap="wrap">{opened.detail || '(No detail. Run /todos refresh to add one.)'}</Text>
+            <Text wrap="wrap">{opened.detail || NO_DETAIL}</Text>
           </Box>
         )}
         <Box flexDirection="row">
           <Text dimColor>
             {GUTTER}
-            {helpLine(current !== '', armed !== '', opened !== undefined, picked.length, list.length)}
+            {help}
           </Text>
           {/* Holds the hotkeys out of sight: a drawn hotkey takes the accent color. */}
           <Box width={0} overflow="hidden">
-            <Button key="next" label="next" hotkey={NEXT_KEY} plain onPress={() => moveFocus($, e.requestId, 1)} />
-            <Button key="previous" label="previous" hotkey={PREVIOUS_KEY} plain onPress={() => moveFocus($, e.requestId, -1)} />
-            <Button key="details" label="details" hotkey={DETAILS_KEY} plain onPress={() => toggleDetails($)} />
-            <Button key="next-page" label="next page" hotkey={NEXT_PAGE_KEY} plain onPress={() => movePage($, e.requestId, 1)} />
-            <Button key="previous-page" label="previous page" hotkey={PREVIOUS_PAGE_KEY} plain onPress={() => movePage($, e.requestId, -1)} />
-            <Button key="paste" label="paste" hotkey={PASTE_KEY} plain onPress={() => paste($)} />
-            <Button key="select" label="select" hotkey={SELECT_KEY} plain onPress={() => toggleSelected($)} />
-            <Button key="select-all" label="select all" hotkey={SELECT_ALL_KEY} plain onPress={() => toggleAll($)} />
-            <Button key="ask" label="ask" hotkey={ASK_KEY} plain onPress={() => askAbout($, isWorking)} />
-            <Button key="delete" label="delete" hotkey={DELETE_KEY} plain onPress={() => deleteFocused($)} />
+            {keyButtons($, ui, view)}
+            <Button key="pane" label="pane" hotkey={TOGGLE_KEY} plain onPress={() => openPane($)} />
           </Box>
         </Box>
       </Box>
     )
+  })
+
+  on('ui.focus', { component: 'Pane', requestId: PANE_ID }, async ($, e, next) => {
+    if (e.element === undefined || e.plugin !== 'todo-list') {
+      return next(e)
+    }
+    const view = paneView($)
+    const list = await read($, items)
+    const last = list.length - 1
+    const held = await focusOf(view, list)
+    // The pane's first stop after it lacked the keys: back on the item it left,
+    // with a delete armed before it left cancelled.
+    const isEntering = !isPaneHeld
+    isPaneHeld = true
+    if (isEntering) {
+      await disarm(view)
+    }
+    let index = Number(e.element.slice(ROW_PREFIX.length))
+    if (isEntering && held !== -1) {
+      index = held
+    } else if (!e.element.startsWith(ROW_PREFIX)) {
+      // As the band does, infer the direction from the row the ring leaves.
+      index = held === last ? 0 : last
+    }
+    if (list[index] === undefined) {
+      return next(e)
+    }
+    await focusItem($, view, index)
+
+    return next({ ...e, element: `${ROW_PREFIX}${index}` })
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
+    const isHeld = e.props.isFocused
+    isPaneHeld = isHeld
+    const [list, current, storedIndex, openTitle, armed, selectedTitles, storedStart] = await Promise.all([
+      read($, items),
+      read($, paneFocused),
+      read($, paneFocusIndex),
+      read($, paneDetailed),
+      read($, paneDeleting),
+      read($, paneSelected),
+      read($, paneWindowStart),
+    ])
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Text } = ui
+    const view = paneView($)
+    const toggle = <Button key="band" label="band" hotkey={TOGGLE_KEY} plain onPress={() => closePane($)} />
+    if (list.length === 0) {
+      return (
+        <Box flexDirection="column">
+          <Text weight="semibold">{GUTTER}Todos</Text>
+          <Text dimColor>{GUTTER}No open items.</Text>
+          <Box width={0} overflow="hidden">
+            {toggle}
+          </Box>
+        </Box>
+      )
+    }
+
+    const picked = pickedFrom(list, selectedTitles)
+    const opened = list.find(one => one.title === openTitle)
+    const { bodyColumns: columns } = e.props
+    const numberWidth = labelWidth(list.length)
+    const focusIndex = resolveFocus(list, current, storedIndex)
+    const room = columns - GUTTER.length - numberWidth
+    const titles = list.map(one => wrapRows(normalizeParens(one.title), room))
+    const details = list.map(one => wrapRows(one.detail || NO_DETAIL, room))
+    const heights = titles.map((rows, i) => rows + (list[i] === opened ? details[i]! : 0))
+    const {
+      window: { start: first, count: size },
+      help,
+    } = fitWindow({
+      columns,
+      length: list.length,
+      // The heading.
+      fixedRows: 1,
+      fit: others => {
+        const rows = e.props.scroll.bodyRows - others
+        paneDrawn = { titles, details, rows }
+        return rowWindow(heights, storedStart, focusIndex, rows)
+      },
+      helpFor: hasPages =>
+        helpLine({
+          kind: 'pane',
+          isHeld,
+          isArmed: armed !== '',
+          isDetailed: opened !== undefined,
+          selectedCount: picked.length,
+          hasPages,
+        }),
+    })
+    const after = Math.max(0, list.length - first - size)
+    // Without an autoFocus row the ring starts on nothing when the pane takes
+    // the keys, so no ui.focus sets a focus and the keys have no item to act on.
+    const ringStart = focusIndex === -1 ? first : focusIndex
+
+    return (
+      <Box flexDirection="column">
+        <Text weight="semibold">{GUTTER}Todos</Text>
+        {list.flatMap((item, i) => {
+          // Without the keys the pane keeps its focus but draws no dot.
+          const isFocused = isHeld && i === focusIndex
+          const isShown = i >= first && i < first + size
+          const row = itemRow(ui, {
+            item,
+            index: i,
+            numberWidth,
+            columns,
+            isShown,
+            isFocused,
+            isWhole: true,
+            isPicked: picked.includes(item),
+            isArmed: isHeld && item.title === armed,
+            autoFocus: i === ringStart ? true : undefined,
+            onPress: () => toggleDetails($, view),
+          })
+          if (!isShown || item !== opened) {
+            return [row]
+          }
+          return [
+            row,
+            <Box key={`detail-${i}`} flexDirection="row">
+              <Text>{' '.repeat(GUTTER.length + numberWidth)}</Text>
+              <Text wrap="wrap">{item.detail || NO_DETAIL}</Text>
+            </Box>,
+          ]
+        })}
+        {after > 0 && (
+          <Text dimColor>
+            {GUTTER}
+            {after} more
+          </Text>
+        )}
+        <Box flexDirection="row">
+          <Text dimColor>
+            {GUTTER}
+            {help}
+          </Text>
+          <Box width={0} overflow="hidden">
+            {keyButtons($, ui, view)}
+            {toggle}
+          </Box>
+        </Box>
+      </Box>
+    )
+  })
+
+  on('ui.close', { id: PANE_ID }, async ($, e, next) => {
+    // Any close lands here, so the list is never left without a view.
+    await Promise.all([clearPane($), update($, mode, () => 'band')])
+
+    return next(e)
   })
 }

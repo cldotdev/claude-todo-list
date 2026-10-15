@@ -41,6 +41,7 @@ claude plugin install todo-list@claude-todo-list
 | Command | Effect |
 | --- | --- |
 | `/todos` | Lists the open items with their details. |
+| `/todos pane` | Opens the list in a pane, see [The Pane](#the-pane). From an empty prompt it hands the keys to the pane, also when the pane is already open. `/todos pane <text>` still sends `pane <text>` as a prompt. |
 | `/todos refresh` | Reviews each item against the whole conversation: removes items that are no longer open, adds missing ones, and refreshes details. |
 | `/todos clear` | Deletes every item. The items go to the trash as your deletions. |
 | `/todos reset` | Empties the list and the trash, which also lifts every never-add-back block. |
@@ -52,7 +53,7 @@ claude plugin install todo-list@claude-todo-list
 
 ### The Band
 
-The band above the prompt shows the numbered list while it has items. It shows at most 10 items at a time as a window over the list, each with its number in the whole list, and a dim `<n> more` line under them counts the items after the window. Leaving the band puts the window back at the top.
+The band above the prompt shows the numbered list while it has items and the pane is closed. It shows its items as a window over the list, each with its number in the whole list, and a dim `<n> more` line under them counts the items after the window. The window holds as many items as fit in the rows Claude Code gives the band, up to 10, so a long draft in the prompt box shrinks the window instead of scrolling the band. When the band holds the focus, its help line is longer and may take another row, which can drop one item from a squeezed window. Leaving the band puts the window back at the top.
 
 | Key | Action |
 | --- | --- |
@@ -60,19 +61,30 @@ The band above the prompt shows the numbered list while it has items. It shows a
 | `j`/`k`, `Tab`/`Shift+Tab` | Move to the next or previous item. |
 | `s` | Select or unselect the focused item. |
 | `a` | Select every item, or clear the selection when every item is already selected. |
-| `n`/`p` | Move the window down or up by up to 10 items; the focus keeps its row in the window. They do nothing with 10 or fewer items, when the window cannot move further, or in the detail view. |
+| `n`/`p` | Move the window down or up by up to the number of items it shows; the focus keeps its row in the window. They do nothing when the whole list fits in the window, when the window cannot move further, or in the detail view. |
 | `v` | Paste the selected items, or the focused item when none is selected, into the prompt box. Each is quoted with its number in the band. |
 | `o`/`Enter` | Show the focused item's detail, or go back to the list. |
+| `t` | Switch to the pane, which hides the band. |
 | `b` | Ask `/btw` about the focused item. While Claude is working, the answer waits for the current turn to end. |
 | `d` | Delete the focused item; a second `d` confirms and `Esc` cancels. |
 | `Esc` | Return to the prompt. The band goes back to the list if it was showing an item's detail. |
+
+### The Pane
+
+The pane lists the items in a pane of its own, which Claude Code docks beside the transcript from 110 columns in fullscreen, floor to ceiling, so a long prompt does not squeeze it. Every title is drawn whole, wrapped over as many rows as it needs, where the band cuts an unfocused title to one row. Its window holds as many items as fit in rows, with no cap of 10, and a dim `<n> more` line counts the items after it. With an empty list it shows `No open items.`
+
+- **Opening**: `t` on the band or `/todos pane` opens it. Besides that it opens on its own only at session start or on a resume when the default view is `pane`, never when the band is squeezed. While the pane is open the band is not drawn, so the list shows in one place. `/todos pane` with an empty prompt box and nothing else holding the keys gives the pane the keys, also when it is already open. After `t`, the band still held the keys when the pane asked for them, so press `Ctrl+X Tab` once to reach the pane.
+- **Default view**: the `default_view` setting, `band` (the default) or `pane`, shows in `/config` as `todo-list.default_view` and is saved in your settings. It applies when a session starts or is resumed, also with an empty list, and the pane it opens takes no keys, so what you type still goes to the prompt box; a change in `/config` takes effect at the next session start, and `t` switches at once. A hot reload of the mod and `/clear` do not apply it again. The pane opens only where Claude Code has room for it: a pane you did not ask for needs a terminal 144 columns wide (110 once you have opened it by hand), and on a narrower one the band stays.
+- **Closing**: `t` on the pane, `Ctrl+X X`, or the pane's close mark closes it and brings the band back. It also clears the pane's focus, selection, and expanded detail. `Esc` hands the keys back to the prompt box and keeps the pane open. `/clear` empties the pane's state but leaves it open.
+- **Keys**: the band's own, `j`/`k`, `Tab`/`Shift+Tab`, `s`, `a`, `n`/`p`, `v`, `o`/`Enter`, `b`, and `d`, with two differences: `o`/`Enter` expands the focused item's detail under its row, one item at a time, with the rest of the list still shown; moving the focus moves the expansion, and a second `o` collapses it; the pane has `t` to go back to the band instead of the band's `t` for the pane.
+- **State**: the pane keeps its own focus, expanded detail, selection, armed delete, and window, apart from the band's. Typing in the prompt box, sending a prompt, and `Esc` do not reset them, and the band's leave does not touch them. A successful `v` clears the pane's selection. While the pane lacks the keys, it draws no focus dot but keeps its focus, and its help line names `Ctrl+X Tab` as the way back. When an item leaves the list by anything other than the pane's own delete, the pane's focus moves to the item now at the same position.
 
 ## Development
 
 | Path | Contents |
 | --- | --- |
-| `hooks/register.tsx` | Event hooks, the `/todos` command, and the band. |
-| `hooks/list.ts` | Model prompts, reply parsing, and the band's window arithmetic. |
+| `hooks/register.tsx` | Event hooks, the `/todos` command, the band, and the pane. |
+| `hooks/list.ts` | Model prompts, reply parsing, and the window arithmetic of the band and the pane. |
 | `hooks/store.ts` | Store keys and the arithmetic that keeps the store under its size cap. |
 | `types/index.d.ts` | The mod's state contract. |
 | `tests/` | Tests run by `claude plugin test`. |

@@ -12,6 +12,11 @@ import {
   TRANSCRIPT_TEXT,
   TRANSCRIPT_TOOL_RESULT_TEXT,
   pageFor,
+  pageRows,
+  rowWindow,
+  windowFor,
+  windowSize,
+  wrapRows,
 } from '../hooks/list'
 import { STORE_CAP, STORE_TARGET, parseKey, storeLength } from '../hooks/store'
 
@@ -50,6 +55,11 @@ function setup(
   const ran: { command: string; args: string }[] = []
   const toasts: string[] = []
   const logs: string[] = []
+  // The plugin's `$.ui.open` and `$.ui.close` calls.
+  const opened: unknown[] = []
+  const closed: unknown[] = []
+  // What the next `$.ui.open` answers; a test sets it false for a surface without panes.
+  const placement = { isPlaced: true }
   const clock = mock.clock(on)
   store(on, stored)
   on('session.start', () => ({ cwd: '/tmp' }))
@@ -71,6 +81,14 @@ function setup(
     logs.push(e.text)
     return { value: undefined }
   })
+  on('ui.open', (_$, e) => {
+    opened.push(e)
+    return { value: { isPlaced: placement.isPlaced } }
+  })
+  on('ui.close', (_$, e) => {
+    closed.push(e)
+    return { value: undefined }
+  })
   on('prompt.edit', (_$, e) => e as never)
   on('ui.render', $ => h($.ui.resolve(BAND).Text, null, 'engine band') as never)
   on('session.id', () => ({ value: 's1' }))
@@ -89,7 +107,7 @@ function setup(
     models.push(e.model)
     return nextReply(replies)
   })
-  return { asked, models, clock, filled, landed, ran, submitted, toasts, logs }
+  return { asked, models, clock, filled, landed, ran, submitted, toasts, logs, opened, closed, placement }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -107,13 +125,23 @@ async function turn($: Engine, clock: MockClock, e: Record<string, unknown>) {
   await clock.advance(0)
 }
 
-async function shown($: Engine) {
-  const ui = await $.ui.mount(BAND)
+async function drawnOf(ui: Mounted<'terminal', 'AbovePrompt'>) {
   const texts = (await ui.findAll({ type: 'Text' })).map(one => one.text)
   const buttons = (await ui.findAll({ type: 'Button' })).length
   await ui.unmount()
   return { texts, buttons }
 }
+
+const expectBandHidden = async ($: Engine) =>
+  expect(await drawnOf(await $.ui.mount({ ...BAND, props: bandProps(20), requestId: 'band' }))).toEqual({
+    texts: ['engine band'],
+    buttons: 0,
+  })
+
+const expectBandShown = async ($: Engine) =>
+  expect((await bandAt($, 20).then(drawnOf)).buttons).toBeGreaterThan(0)
+
+const shown = ($: Engine) => $.ui.mount(BAND).then(drawnOf)
 
 test('a normal answer updates the list and draws the band', async ($, on) => {
   const { asked, clock } = setup(on, [{ isAnswered: true, text: '{"remove":[],"add":[{"title":"補跑測試","detail":"d-補跑測試"},{"title":"確認設計","detail":"d-確認設計"}]}' }])
@@ -123,7 +151,7 @@ test('a normal answer updates the list and draws the band', async ($, on) => {
   expect(asked[0]).toContain('ask')
   const { texts, buttons } = await shown($)
   expect(texts.map(one => one.trim())).toContain('Todos')
-  expect(buttons).toBe(12)
+  expect(buttons).toBe(13)
 })
 
 test('subagent and aborted turns are skipped', async ($, on) => {
@@ -149,7 +177,7 @@ test('a failed or unparseable completion keeps the previous list', async ($, on)
   }
   const { texts, buttons } = await shown($)
   expect(texts.map(one => one.trim())).toContain('Todos')
-  expect(buttons).toBe(11)
+  expect(buttons).toBe(12)
 })
 
 // Moves the band's focus ring onto one of its Buttons, as Tab would.
@@ -177,7 +205,7 @@ test('the paste key pastes the focused item, numbered as in the band, when nothi
   await ui.press({ key: 'paste' })
   await ui.unmount()
   expect(filled).toEqual(['> 2. b\n>    d-b\n\n'])
-  expect((await shown($)).buttons).toBe(12)
+  expect((await shown($)).buttons).toBe(13)
 })
 
 test('the focus ring skips the hidden hotkey Buttons and wraps around the rows', async ($, on) => {
@@ -205,12 +233,12 @@ test('/todos delete removes an item, records it and keeps it from coming back', 
 
   const removed = await $.command.run({ command: 'todos', args: 'delete 1', origin, presentation })
   expect(removed.text).toBe('Removed 1 item:\n1. a')
-  expect((await shown($)).buttons).toBe(11)
+  expect((await shown($)).buttons).toBe(12)
 
   await turn($, clock, {})
   expect(asked[1]).toContain('Items the user removed')
   expect(asked[1]).toContain('["a"]')
-  expect((await shown($)).buttons).toBe(11)
+  expect((await shown($)).buttons).toBe(12)
 })
 
 test('the band shows every item', async ($, on) => {
@@ -220,7 +248,7 @@ test('the band shows every item', async ($, on) => {
   await start($)
   await turn($, clock, {})
   const { texts, buttons } = await shown($)
-  expect(buttons).toBe(17)
+  expect(buttons).toBe(18)
   expect(texts.map(one => one.trim())).toContain('Todos')
 })
 
@@ -429,8 +457,10 @@ async function bandWith($: Engine, on: On, json: string, replies: Reply[] = []) 
   return { ...ctx, band, listed }
 }
 
+type Drawn = Mounted<'terminal', 'AbovePrompt'> | Mounted<'terminal', 'Pane'>
+
 // The title text of the row the dot marks.
-async function dotted(band: Mounted<'terminal', 'AbovePrompt'>) {
+async function dotted(band: Drawn) {
   const texts = (await band.findAll({ type: 'Text' })).map(one => one.text)
   const at = texts.indexOf('• ')
   return at === -1 ? undefined : texts[at + 2]
@@ -560,10 +590,10 @@ const FIVE = JSON.stringify({
 })
 
 // Selected rows color their number.
-const marks = async (band: Mounted<'terminal', 'AbovePrompt'>) =>
+const marks = async (band: Drawn) =>
   (await band.findAll({ type: 'Text', text: /^\d+\. *$/ })).filter(one => one.props.color !== undefined).length
 
-const helpOf = async (band: Mounted<'terminal', 'AbovePrompt'>) =>
+const helpOf = async (band: Drawn) =>
   (await band.findAll({ type: 'Text' })).map(one => one.text).at(-1)?.trim()
 
 test('the select key toggles the focused item and marks it', async ($, on) => {
@@ -676,7 +706,7 @@ const listOf = (count: number) =>
   })
 
 // The item numbers the band draws, and the `<n> more` line when there is one.
-async function windowOf(band: Mounted<'terminal', 'AbovePrompt'>) {
+async function windowOf(band: Drawn) {
   const texts = (await band.findAll({ type: 'Text' })).map(one => one.text.trim())
   return {
     numbers: texts.filter(one => /^\d+\.$/.test(one)).map(one => parseInt(one, 10)),
@@ -722,14 +752,14 @@ test('focus moves scroll the window by the least distance', async ($, on) => {
 })
 
 test('paging stays full, moves by up to 10 items, and keeps the focus row', () => {
-  expect(pageFor(25, 0, 4, 1)).toEqual({ start: 10, index: 14 })
-  expect(pageFor(25, 10, 14, 1)).toEqual({ start: 15, index: 19 })
-  expect(pageFor(25, 15, 19, 1)).toBeNull()
-  expect(pageFor(25, 5, 7, -1)).toEqual({ start: 0, index: 2 })
-  expect(pageFor(25, 0, 4, -1)).toBeNull()
-  expect(pageFor(7, 0, 3, 1)).toBeNull()
+  expect(pageFor(25, 0, 4, 1, 10)).toEqual({ start: 10, index: 14 })
+  expect(pageFor(25, 10, 14, 1, 10)).toEqual({ start: 15, index: 19 })
+  expect(pageFor(25, 15, 19, 1, 10)).toBeNull()
+  expect(pageFor(25, 5, 7, -1, 10)).toEqual({ start: 0, index: 2 })
+  expect(pageFor(25, 0, 4, -1, 10)).toBeNull()
+  expect(pageFor(7, 0, 3, 1, 10)).toBeNull()
   // A stale start is read as the window drawn around the focus.
-  expect(pageFor(25, 0, 24, -1)).toEqual({ start: 5, index: 14 })
+  expect(pageFor(25, 0, 24, -1, 10)).toEqual({ start: 5, index: 14 })
 })
 
 test('the paging keys change nothing at an edge of the list', async ($, on) => {
@@ -780,6 +810,7 @@ test('the help line names the paging keys only while the list holds more than 10
   await focusRow($, 0)
   expect(await helpOf(long.band)).toContain('n/p page')
   expect(await helpOf(long.band)).toContain('v paste')
+  expect(await helpOf(long.band)).toContain('t pane')
   await long.band.unmount()
 })
 
@@ -1547,4 +1578,622 @@ test('/clear deletes every key of the session, legacy or new', async ($, on) => 
   on('session.end', (_$, e) => e as never)
   await $.session.end({ reason: 'clear', sessionId: 's1' } as never)
   expect([...map.keys()]).toEqual(['session:other:1000:50'])
+})
+
+test('the window size fits the rows and reserves the more row', () => {
+  expect(windowSize(20, 7, 3)).toBe(7)
+  expect(windowSize(8, 7, 3)).toBe(4)
+  expect(windowSize(8, 25, 3)).toBe(4)
+  expect(windowSize(3, 25, 3)).toBe(1)
+  expect(windowSize(1, 25, 3)).toBe(1)
+  expect(windowSize(20, 25, 3, 10)).toBe(10)
+  expect(windowSize(40, 25, 2)).toBe(25)
+  expect(windowSize(12, 25, 2)).toBe(9)
+  expect(windowSize(30, 12, 3, 10)).toBe(10)
+  expect(windowSize(5, 0, 3)).toBe(0)
+})
+
+test('the wrap counter breaks Latin text at spaces and wide characters anywhere', () => {
+  expect(wrapRows('', 10)).toBe(1)
+  expect(wrapRows('hello world', 11)).toBe(1)
+  expect(wrapRows('hello world', 10)).toBe(2)
+  expect(wrapRows('aaaa bbbb cccc', 9)).toBe(2)
+  expect(wrapRows('a\nb', 10)).toBe(2)
+  expect(wrapRows('abcdefghij', 4)).toBe(3)
+  expect(wrapRows('一二三四五', 4)).toBe(3)
+  expect(wrapRows('abc 一二三', 6)).toBe(2)
+})
+
+test('the window and paging helpers take the window size', () => {
+  expect(windowFor(25, 0, 5, 4)).toBe(2)
+  expect(windowFor(25, 20, -1, 4)).toBe(20)
+  expect(windowFor(25, 24, -1, 4)).toBe(21)
+  expect(pageFor(25, 0, 1, 1, 4)).toEqual({ start: 4, index: 5 })
+  expect(pageFor(25, 21, 23, 1, 4)).toBeNull()
+  expect(pageFor(25, 4, 6, -1, 4)).toEqual({ start: 0, index: 2 })
+})
+
+// Wide enough for the focused help line to fit on one row.
+const WIDE_COLUMNS = 200
+
+const bandProps = (maxRows: number, bodyColumns = WIDE_COLUMNS, isWorking = false) =>
+  ({ hasSurvey: false, isWorking, maxRows, bodyColumns }) as never
+
+const bandAt = ($: Engine, maxRows: number, bodyColumns = WIDE_COLUMNS) =>
+  $.ui.mount({ ...BAND, props: bandProps(maxRows, bodyColumns), requestId: 'band' })
+
+// A session whose list holds `json`'s items, with nothing mounted.
+async function listWith($: Engine, on: On, json: string) {
+  const ctx = setup(on, [answered(json)])
+  await start($)
+  await turn($, ctx.clock, {})
+  return ctx
+}
+
+test('the band fits its window to the rows it is given', async ($, on) => {
+  await listWith($, on, listOf(25))
+  for (const [rows, numbers, more] of [
+    [20, range(1, 10), '15 more'],
+    [8, range(1, 4), '21 more'],
+    [3, [1], '24 more'],
+  ] as const) {
+    const band = await bandAt($, rows)
+    expect(await windowOf(band)).toEqual({ numbers, more })
+    await band.unmount()
+  }
+})
+
+test('a squeezed short list is windowed and names the paging keys', async ($, on) => {
+  await listWith($, on, listOf(7))
+  const band = await bandAt($, 8)
+  expect(await windowOf(band)).toEqual({ numbers: range(1, 4), more: '3 more' })
+  await focusRow($, 0)
+  expect(await helpOf(band)).toContain('n/p page')
+  expect(await helpOf(band)).toContain('t pane')
+  await band.unmount()
+})
+
+test('a wrapped focused title takes a row from the window', async ($, on) => {
+  const title = '一'.repeat(75)
+  const json = JSON.stringify({
+    remove: [],
+    add: [{ title, detail: '' }, ...range(2, 25).map(n => ({ title: `t${n}`, detail: '' }))],
+  })
+  await listWith($, on, json)
+  const band = await bandAt($, 8, 150)
+  expect(wrapRows(`  ${await helpOf(band)}`, 150)).toBe(1)
+  await focusRow($, 0)
+  expect(wrapRows(`  ${await helpOf(band)}`, 150)).toBe(1)
+  expect((await windowOf(band)).numbers).toEqual(range(1, 3))
+  await band.unmount()
+})
+
+test('a help line that wraps takes a row from the window once the band holds the focus', async ($, on) => {
+  await listWith($, on, listOf(25))
+  const band = await bandAt($, 8, 80)
+  expect((await windowOf(band)).numbers).toEqual(range(1, 4))
+  await focusRow($, 0)
+  expect((await windowOf(band)).numbers).toEqual(range(1, 3))
+  await band.unmount()
+})
+
+test('mounting the band again with fewer rows shrinks the window around the focus', async ($, on) => {
+  await listWith($, on, listOf(25))
+  const tall = await bandAt($, 20)
+  await focusRow($, 8)
+  expect((await windowOf(tall)).numbers).toEqual(range(1, 10))
+  await tall.unmount()
+  const short = await bandAt($, 8)
+  expect((await windowOf(short)).numbers).toEqual(range(6, 9))
+  expect(await dotted(short)).toBe('t9')
+  await short.unmount()
+})
+
+const PANE_ID = 'todos'
+
+const panePropsOf = (bodyRows: number, isFocused = true, bodyColumns = WIDE_COLUMNS) =>
+  ({
+    title: 'Todos',
+    isFocused,
+    bodyColumns,
+    placement: 'dock',
+    scroll: { offset: 0, bodyRows },
+    view: {},
+  }) as never
+
+const paneAt = ($: Engine, bodyRows: number, isFocused = true, bodyColumns = WIDE_COLUMNS) =>
+  $.ui.mount({
+    plugin: 'todo-list',
+    surface: 'terminal',
+    component: 'Pane',
+    props: panePropsOf(bodyRows, isFocused, bodyColumns),
+    requestId: PANE_ID,
+  })
+
+const focusPane = ($: Engine, row: number) =>
+  $.ui.focus({
+    component: 'Pane',
+    requestId: PANE_ID,
+    plugin: 'todo-list',
+    element: `item-${row}`,
+    origin: { kind: 'person' },
+  })
+
+test('/todos pane opens the pane asking for the keys, again when it is open', async ($, on) => {
+  const { opened } = await listWith($, on, THREE)
+  expect(await run($, 'pane')).toBe('The Todos pane is open.')
+  expect(opened).toEqual([{ id: PANE_ID, title: 'Todos', focus: true }])
+  expect(await run($, 'pane')).toBe('The Todos pane is open.')
+  expect(opened).toEqual([
+    { id: PANE_ID, title: 'Todos', focus: true },
+    { id: PANE_ID, title: 'Todos', focus: true },
+  ])
+})
+
+test('/todos pane hides the band', async ($, on) => {
+  await listWith($, on, THREE)
+  await expectBandShown($)
+  await run($, 'pane')
+  await expectBandHidden($)
+})
+
+test('a pane that cannot be placed leaves the band shown', async ($, on) => {
+  const { placement } = await listWith($, on, THREE)
+  placement.isPlaced = false
+  expect(await run($, 'pane')).toBe('The Todos pane cannot be shown here.')
+  await expectBandShown($)
+
+  const again = await bandAt($, 20)
+  await focusRow($, 1)
+  await again.press({ key: 'pane' })
+  await again.unmount()
+  await expectBandShown($)
+})
+
+test('/todos pane with text still goes out as a prompt', async ($, on) => {
+  const { clock, submitted, opened } = await listWith($, on, THREE)
+  expect(await run($, 'pane layout looks wrong')).toBe('Sent the prompt with 3 items.')
+  await clock.advance(0)
+  expect(submitted).toEqual(['> 1. a\n>    d-a\n>\n> 2. b\n>    d-b\n>\n> 3. c\n>    d-c\n\npane layout looks wrong'])
+  expect(opened).toEqual([])
+})
+
+test('the band switches to the pane with t, asking for the keys', async ($, on) => {
+  const { opened } = await listWith($, on, THREE)
+  const band = await bandAt($, 20)
+  const keys = await band.findAll({ type: 'Button' })
+  expect(keys.find(one => one.props.label === 'pane')?.props.hotkey).toBe('t')
+  await focusRow($, 1)
+  await band.press({ key: 'pane' })
+  expect(opened).toEqual([{ id: PANE_ID, title: 'Todos', focus: true }])
+  await band.unmount()
+  await expectBandHidden($)
+})
+
+test('the pane closes itself with t', async ($, on) => {
+  const { closed } = await listWith($, on, THREE)
+  await run($, 'pane')
+  const pane = await paneAt($, 40)
+  const keys = await pane.findAll({ type: 'Button' })
+  expect(keys.find(one => one.props.label === 'band')?.props.hotkey).toBe('t')
+  await pane.press({ key: 'band' })
+  expect(closed).toEqual([{ id: PANE_ID, origin: { kind: 'plugin' } }])
+  await pane.unmount()
+})
+
+test('/clear clears the pane but keeps the pane mode', async ($, on) => {
+  on('session.end', (_$, e) => e as never)
+  const ctx = setup(on, [answered(listOf(5)), answered(listOf(5))])
+  await start($)
+  await turn($, ctx.clock, {})
+  await run($, 'pane')
+  await $.session.end({ reason: 'clear', sessionId: 's1' } as never)
+  await turn($, ctx.clock, {})
+  await expectBandHidden($)
+})
+
+test('a session start and a squeezed band do not open the pane', async ($, on) => {
+  const { opened } = await listWith($, on, listOf(25))
+  await start($)
+  const band = await bandAt($, 3)
+  expect((await windowOf(band)).numbers).toEqual([1])
+  await band.unmount()
+  expect(opened).toEqual([])
+})
+
+test('a tall pane shows every item and a short one counts the rest', async ($, on) => {
+  await listWith($, on, listOf(25))
+  const tall = await paneAt($, 40)
+  expect(await windowOf(tall)).toEqual({ numbers: range(1, 25), more: undefined })
+  await tall.unmount()
+  const short = await paneAt($, 12)
+  expect(await windowOf(short)).toEqual({ numbers: range(1, 9), more: '16 more' })
+  await short.unmount()
+})
+
+test('the pane shows the empty list', async ($, on) => {
+  setup(on, [])
+  await start($)
+  const pane = await paneAt($, 12)
+  const texts = (await pane.findAll({ type: 'Text' })).map(one => one.text.trim())
+  expect(texts).toContain('No open items.')
+  await pane.unmount()
+})
+
+test('the pane expands the focused detail in place and the expansion follows the focus', async ($, on) => {
+  await listWith($, on, listOf(25))
+  const pane = await paneAt($, 40)
+  const texts = async () => (await pane.findAll({ type: 'Text' })).map(one => one.text.trim())
+  await focusPane($, 3)
+  await pane.press({ key: 'details' })
+  expect(await texts()).toContain('d-t4')
+  expect((await windowOf(pane)).numbers).toEqual(range(1, 25))
+  await focusPane($, 4)
+  expect(await texts()).toContain('d-t5')
+  expect(await texts()).not.toContain('d-t4')
+  expect(await dotted(pane)).toBe('t5')
+  await pane.press({ key: 'details' })
+  expect((await texts()).filter(one => one.startsWith('d-'))).toEqual([])
+  await pane.unmount()
+})
+
+test('the pane window counts the expanded detail', async ($, on) => {
+  await listWith($, on, listOf(25))
+  const pane = await paneAt($, 12)
+  await focusPane($, 2)
+  expect((await windowOf(pane)).numbers).toEqual(range(1, 9))
+  await pane.press({ key: 'details' })
+  expect((await windowOf(pane)).numbers).toEqual(range(1, 8))
+  await pane.unmount()
+})
+
+test('the pane keeps its own focus and selection apart from the band', async ($, on) => {
+  const { filled } = await listWith($, on, listOf(25))
+  const band = await bandAt($, 20)
+  const pane = await paneAt($, 40)
+  await focusRow($, 1)
+  await focusPane($, 5)
+  await pane.press({ key: 'select' })
+  expect(await marks(band)).toBe(0)
+  expect(await marks(pane)).toBe(1)
+  expect(await dotted(band)).toBe('t2')
+  expect(await dotted(pane)).toBe('t6')
+
+  // The band's Esc and a prompt edit leave the pane as it was.
+  await pane.press({ key: 'details' })
+  await $.ui.focus({ component: 'AbovePrompt', requestId: 'band', origin: { kind: 'person' } })
+  const prompt = $.prompt as typeof $.prompt & { edit: EngineCall<'prompt.edit'> }
+  await prompt.edit({ text: 'x', inputText: 'x', cursor: 1, start: 1, end: 1 } as never)
+  expect(await dotted(band)).toBeUndefined()
+  expect(await dotted(pane)).toBe('t6')
+  expect(await marks(pane)).toBe(1)
+  expect((await pane.findAll({ type: 'Text' })).map(one => one.text.trim())).toContain('d-t6')
+
+  await pane.press({ key: 'paste' })
+  expect(filled).toEqual(['> 6. t6\n>    d-t6\n\n'])
+  expect(await marks(pane)).toBe(0)
+  await band.unmount()
+  await pane.unmount()
+})
+
+test('clearing the session clears the pane atoms', async ($, on) => {
+  on('session.end', (_$, e) => e as never)
+  const ctx = setup(on, [answered(listOf(5)), answered(listOf(5))])
+  await start($)
+  await turn($, ctx.clock, {})
+  const pane = await paneAt($, 40)
+  await focusPane($, 3)
+  await pane.press({ key: 'select' })
+  await pane.press({ key: 'details' })
+  await $.session.end({ reason: 'clear', sessionId: 's1' } as never)
+  await turn($, ctx.clock, {})
+  expect(await dotted(pane)).toBeUndefined()
+  expect(await marks(pane)).toBe(0)
+  const texts = (await pane.findAll({ type: 'Text' })).map(one => one.text.trim())
+  expect(texts.filter(one => one.startsWith('d-'))).toEqual([])
+  await pane.unmount()
+})
+
+test('a band delete under the pane focus hands the focus to the item now there', async ($, on) => {
+  await listWith($, on, listOf(5))
+  const pane = await paneAt($, 40)
+  await focusPane($, 2)
+  expect(await dotted(pane)).toBe('t3')
+  await run($, 'delete 3')
+  expect(await dotted(pane)).toBe('t4')
+  await run($, 'delete 3-4')
+  expect(await dotted(pane)).toBe('t2')
+  await pane.unmount()
+})
+
+test('a confirmed pane delete moves the pane focus to the item that followed', async ($, on) => {
+  const { clock } = await listWith($, on, listOf(5))
+  const pane = await paneAt($, 40)
+  await focusPane($, 2)
+  await pane.press({ key: 'delete' })
+  expect((await pane.findAll({ type: 'Text' })).map(one => one.text.trim())).toContain('delete?')
+  await pane.press({ key: 'delete' })
+  await clock.advance(0)
+  expect(await dotted(pane)).toBe('t4')
+  expect((await windowOf(pane)).numbers).toEqual(range(1, 4))
+  await pane.unmount()
+})
+
+test('the pane draws no focus dot and hides an armed delete while it lacks the keys', async ($, on) => {
+  await listWith($, on, listOf(5))
+  const held = await paneAt($, 40)
+  await focusPane($, 3)
+  await held.press({ key: 'delete' })
+  const dot = async (pane: Drawn) => (await pane.findAll({ type: 'Text', text: '• ' }))[0]
+  expect(await dot(held)).toBeDefined()
+  await held.unmount()
+
+  const away = await paneAt($, 40, false)
+  expect(await dot(away)).toBeUndefined()
+  expect((await away.findAll({ type: 'Text' })).map(one => one.text.trim())).not.toContain('delete?')
+  await away.unmount()
+})
+
+test('the ring entering the pane lands on the item it left and cancels an armed delete', async ($, on) => {
+  const { landed } = await listWith($, on, listOf(5))
+  const held = await paneAt($, 40)
+  await focusPane($, 3)
+  await held.press({ key: 'delete' })
+  await held.unmount()
+
+  const away = await paneAt($, 40, false)
+  await focusPane($, 0)
+  expect(landed.at(-1)).toBe('item-3')
+  await away.unmount()
+  const back = await paneAt($, 40)
+  expect(await dotted(back)).toBe('t4')
+  expect((await back.findAll({ type: 'Text' })).map(one => one.text.trim())).not.toContain('delete?')
+  await back.unmount()
+})
+
+test('a pane with no focus yet puts the ring on its first shown item', async ($, on) => {
+  await listWith($, on, listOf(5))
+  const pane = await paneAt($, 40)
+  const autoFocused = async () =>
+    (await pane.findAll({ type: 'Button' })).filter(one => one.props.autoFocus === true).map(one => one.key)
+  expect(await autoFocused()).toEqual(['item-0'])
+
+  await focusPane($, 3)
+  expect(await autoFocused()).toEqual(['item-3'])
+  await pane.unmount()
+})
+
+test('the pane asks /btw and waits for the turn the band reports', async ($, on) => {
+  const { clock, ran, toasts } = await listWith($, on, listOf(3))
+  const pane = await paneAt($, 40)
+  await focusPane($, 1)
+  await pane.press({ key: 'ask' })
+  await clock.advance(0)
+  expect(ran).toHaveLength(1)
+  expect(ran[0]?.args).toContain('"t2"')
+  expect(toasts).toEqual([])
+
+  const busy = await $.ui.mount({ ...BAND, props: bandProps(20, 80, true), requestId: 'band' })
+  await pane.press({ key: 'ask' })
+  await clock.advance(0)
+  expect(toasts).toHaveLength(1)
+  await busy.unmount()
+  await pane.unmount()
+})
+
+test('the pane help line names its keys while focused and the focus chord while not', async ($, on) => {
+  await listWith($, on, listOf(25))
+  const pane = await paneAt($, 12)
+  await focusPane($, 0)
+  const help = await helpOf(pane)
+  expect(help).toContain('o/Enter expand')
+  expect(help).toContain('n/p page')
+  expect(help).toContain('t band')
+  expect(help).not.toContain('t pane')
+  await pane.press({ key: 'details' })
+  expect(await helpOf(pane)).toContain('o/Enter collapse')
+  await pane.unmount()
+
+  const away = await paneAt($, 12, false)
+  expect(await helpOf(away)).toBe('Ctrl+X Tab to focus')
+  await away.unmount()
+})
+
+test('the pane help line leaves the paging keys out when the list fits', async ($, on) => {
+  await listWith($, on, listOf(5))
+  const pane = await paneAt($, 40)
+  await focusPane($, 0)
+  expect(await helpOf(pane)).toContain('v paste')
+  expect(await helpOf(pane)).not.toContain('n/p page')
+  await pane.unmount()
+})
+
+const defaultViewRow = (value: string) => ({
+  key: 'todo-list.default_view',
+  label: 'Default view',
+  kind: 'choice',
+  value,
+  options: ['band', 'pane'],
+  provider: { kind: 'plugin', name: 'todo-list' },
+  isLocked: false,
+})
+
+// A session that starts with `default_view` set to `value`, then holds `json`'s items.
+async function startedWith($: Engine, on: On, value: string, json = listOf(3)) {
+  const ctx = setup(on, [answered(json)])
+  on('config.list', () => ({ value: [defaultViewRow(value)] }) as never)
+  on('session.end', (_$, e) => e as never)
+  await start($)
+  await turn($, ctx.clock, {})
+  return ctx
+}
+
+test('a default view of pane opens the pane at session start, also on an empty list', async ($, on) => {
+  const ctx = setup(on, [])
+  on('config.list', () => ({ value: [defaultViewRow('pane')] }) as never)
+  await start($)
+  expect(ctx.opened).toEqual([{ id: PANE_ID, title: 'Todos' }])
+  await expectBandHidden($)
+  const pane = await paneAt($, 12)
+  expect((await pane.findAll({ type: 'Text' })).map(one => one.text.trim())).toContain('No open items.')
+  await pane.unmount()
+})
+
+test('a default view of band leaves the pane closed', async ($, on) => {
+  const { opened } = await startedWith($, on, 'band')
+  expect(opened).toEqual([])
+  await expectBandShown($)
+})
+
+test('a missing or unreadable default view row leaves the band', async ($, on) => {
+  const ctx = setup(on, [])
+  on('config.list', () => ({ value: [] }) as never)
+  await start($)
+  expect(ctx.opened).toEqual([])
+})
+
+test('a default view that cannot be read leaves the band', async ($, on) => {
+  const ctx = setup(on, [])
+  on('config.list', () => {
+    throw new Error('unreadable')
+  })
+  await start($)
+  expect(ctx.opened).toEqual([])
+})
+
+test('a pane that cannot be placed at session start leaves the band', async ($, on) => {
+  const ctx = setup(on, [answered(listOf(3))])
+  ctx.placement.isPlaced = false
+  on('config.list', () => ({ value: [defaultViewRow('pane')] }) as never)
+  await start($)
+  await turn($, ctx.clock, {})
+  expect(ctx.opened).toHaveLength(1)
+  await expectBandShown($)
+})
+
+test('a reload does not apply the default view again', async ($, on) => {
+  const { opened } = await startedWith($, on, 'pane')
+  expect(opened).toHaveLength(1)
+  await start($)
+  expect(opened).toHaveLength(1)
+})
+
+test('/clear does not apply the default view again', async ($, on) => {
+  const ctx = await startedWith($, on, 'pane')
+  await $.session.end({ reason: 'clear', sessionId: 's1' } as never)
+  expect(ctx.opened).toHaveLength(1)
+})
+
+test('row windows hold the whole list when it fits', () => {
+  expect(rowWindow([2, 1, 2], 0, -1, 5)).toEqual({ start: 0, count: 3 })
+  expect(rowWindow([2, 1, 2], 2, 2, 5)).toEqual({ start: 0, count: 3 })
+  expect(rowWindow([], 3, -1, 5)).toEqual({ start: 0, count: 0 })
+})
+
+test('a row window reserves the more row and holds at least one item', () => {
+  // 2 + 2 + 1 rows, then the more row.
+  expect(rowWindow([2, 2, 1, 2, 2, 2], 0, -1, 6)).toEqual({ start: 0, count: 3 })
+  expect(rowWindow([2, 2, 1, 2, 2, 2], 0, -1, 7)).toEqual({ start: 0, count: 3 })
+  expect(rowWindow([2, 2, 1, 2, 2, 2], 0, -1, 8)).toEqual({ start: 0, count: 4 })
+  expect(rowWindow([5, 5], 0, -1, 2)).toEqual({ start: 0, count: 1 })
+  expect(rowWindow([5, 5], 1, -1, 2)).toEqual({ start: 1, count: 1 })
+})
+
+test('a row window moves the least distance that shows the whole focused item', () => {
+  const heights = [2, 2, 2, 2, 2, 2, 2, 2]
+  expect(rowWindow(heights, 0, 2, 7)).toEqual({ start: 0, count: 3 })
+  expect(rowWindow(heights, 0, 3, 7)).toEqual({ start: 1, count: 3 })
+  expect(rowWindow(heights, 4, 1, 7)).toEqual({ start: 1, count: 3 })
+  // A tall focused item pushes the start on past items that would still fit.
+  expect(rowWindow([1, 1, 1, 6, 1], 0, 3, 8)).toEqual({ start: 2, count: 3 })
+  expect(rowWindow([1, 1, 1, 6, 1], 0, 3, 7)).toEqual({ start: 3, count: 2 })
+})
+
+test('a row window that reaches the last item pulls up while earlier items fit', () => {
+  const heights = [2, 2, 1, 2, 2, 2]
+  expect(rowWindow(heights, 5, -1, 7)).toEqual({ start: 2, count: 4 })
+  expect(rowWindow(heights, 4, 5, 7)).toEqual({ start: 2, count: 4 })
+  expect(rowWindow(heights, 99, -1, 7)).toEqual({ start: 2, count: 4 })
+})
+
+test('a page down starts at the first item after the window and keeps the focus offset', () => {
+  const heights = Array.from({ length: 25 }, () => 1)
+  expect(pageRows(heights, 0, 2, 1, 10)).toEqual({ start: 9, index: 11 })
+  // The last window is held full: 10 items fit, as no more row follows.
+  expect(pageRows(heights, 9, 11, 1, 10)).toEqual({ start: 15, index: 17 })
+  expect(pageRows(heights, 15, 17, 1, 10)).toBeNull()
+  expect(pageRows(heights, 15, 17, -1, 10)).toEqual({ start: 6, index: 8 })
+})
+
+test('a page down clamps the focus offset to the new window', () => {
+  const heights = [1, 1, 1, 1, 1, 1, 1, 3, 3]
+  // Window 0-3, then 4-6 where the focus offset 3 clamps to the third item.
+  expect(pageRows(heights, 0, 3, 1, 5)).toEqual({ start: 4, index: 6 })
+  expect(pageRows([1, 1, 1, 1, 1, 3, 3], 0, 3, 1, 5)).toEqual({ start: 4, index: 4 + 1 })
+})
+
+test('a page up ends just before the current start', () => {
+  const heights = [2, 2, 1, 2, 2, 2, 2, 2]
+  // The window from 5 shows 5-7; a page up ends before it and fills rows back to item 2.
+  expect(pageRows(heights, 5, 6, -1, 7)).toEqual({ start: 2, index: 3 })
+  expect(pageRows(heights, 2, 3, -1, 7)).toEqual({ start: 0, index: 1 })
+  // A window of 1 item reaches back one item at a time when none else fits.
+  expect(pageRows([5, 5, 5], 2, 2, -1, 3)).toEqual({ start: 1, index: 1 })
+})
+
+test('paging does nothing when the window cannot move', () => {
+  expect(pageRows([1, 1, 1], 0, 1, 1, 10)).toBeNull()
+  expect(pageRows([1, 1, 1], 0, 1, -1, 10)).toBeNull()
+  expect(pageRows(Array.from({ length: 25 }, () => 1), 0, 2, -1, 10)).toBeNull()
+  expect(pageRows(Array.from({ length: 25 }, () => 1), 15, 16, 1, 10)).toBeNull()
+  expect(pageRows([], 0, -1, 1, 10)).toBeNull()
+})
+
+// At this width every title takes two rows, apart from item 3.
+const NARROW = 70
+const WRAPPED_ROWS = 25
+const wrappedTitle = (n: number) => (n === 3 ? 'short' : `t${n} ${`${'w'.repeat(9)} `.repeat(7)}`.trim())
+const WRAPPED = JSON.stringify({
+  remove: [],
+  add: range(1, WRAPPED_ROWS).map(n => ({ title: wrappedTitle(n), detail: `d-${n}` })),
+})
+
+test('the pane draws every title whole and fits its window to the rows they take', async ($, on) => {
+  await listWith($, on, WRAPPED)
+  // 12 body rows less the heading and the help line leave 10 for items and the more row.
+  const pane = await paneAt($, 12, false, NARROW)
+  const texts = (await pane.findAll({ type: 'Text' })).map(one => one.text.trim())
+  expect(await windowOf(pane)).toEqual({ numbers: range(1, 5), more: '20 more' })
+  expect(texts).toContain(wrappedTitle(2))
+  expect(texts).toContain(wrappedTitle(5))
+  await pane.unmount()
+  const band = await bandAt($, 20, NARROW)
+  expect((await band.findAll({ type: 'Text' })).map(one => one.text.trim())).not.toContain(wrappedTitle(2))
+  await band.unmount()
+})
+
+test('the pane counts the expanded detail in rows and moves the window to show it', async ($, on) => {
+  await listWith($, on, WRAPPED)
+  // 15 body rows less the heading and the two help rows leave 12 for items and the more row.
+  const pane = await paneAt($, 15, true, NARROW)
+  expect(wrapRows(`  ${await helpOf(pane)}`, NARROW)).toBe(2)
+  expect((await windowOf(pane)).numbers).toEqual(range(1, 6))
+  await focusPane($, 0)
+  await pane.press({ key: 'details' })
+  expect((await windowOf(pane)).numbers).toEqual(range(1, 5))
+  await focusPane($, 5)
+  expect((await windowOf(pane)).numbers).toEqual(range(2, 6))
+  await pane.unmount()
+})
+
+test('the pane help line names the paging keys while the rows cannot hold the list', async ($, on) => {
+  await listWith($, on, WRAPPED)
+  const short = await paneAt($, 12)
+  await focusPane($, 0)
+  expect(await helpOf(short)).toContain('n/p page')
+  await short.unmount()
+  const tall = await paneAt($, 80)
+  expect(await helpOf(tall)).not.toContain('n/p page')
+  expect((await windowOf(tall)).numbers).toEqual(range(1, WRAPPED_ROWS))
+  await tall.unmount()
 })
