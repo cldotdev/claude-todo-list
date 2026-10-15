@@ -1789,6 +1789,19 @@ test('the pane closes itself with t', async ($, on) => {
   await pane.press({ key: 'band' })
   expect(closed).toEqual([{ id: PANE_ID, origin: { kind: 'plugin' } }])
   await pane.unmount()
+  await expectBandShown($)
+})
+
+test('t on the pane redraws the band that stayed mounted', async ($, on) => {
+  await listWith($, on, THREE)
+  const band = await bandAt($, 20)
+  await run($, 'pane')
+  expect(await band.findAll({ type: 'Button' })).toEqual([])
+  const pane = await paneAt($, 40)
+  await pane.press({ key: 'band' })
+  await pane.unmount()
+  expect((await band.findAll({ type: 'Button' })).length).toBeGreaterThan(0)
+  await band.unmount()
 })
 
 test('/clear clears the pane but keeps the pane mode', async ($, on) => {

@@ -301,7 +301,15 @@ async function clearPane($: EngineInterface) {
   ])
 }
 
-const closePane = ($: EngineInterface) => $.ui.close({ id: PANE_ID })
+// What every close of the pane ends with, so the list is never left without a view.
+const backToBand = ($: EngineInterface) => Promise.all([clearPane($), update($, mode, () => 'band')])
+
+// A close raised from the pane's own Button does not reach this plugin's
+// ui.close hook, so the band comes back here as well.
+async function closePane($: EngineInterface) {
+  await $.ui.close({ id: PANE_ID })
+  await backToBand($)
+}
 
 // The dot, the selection, a pending delete, the detail view, and the window's
 // position last only while the band holds the focus.
@@ -1553,8 +1561,7 @@ export const register: Register = on => {
   })
 
   on('ui.close', { id: PANE_ID }, async ($, e, next) => {
-    // Any close lands here, so the list is never left without a view.
-    await Promise.all([clearPane($), update($, mode, () => 'band')])
+    await backToBand($)
 
     return next(e)
   })
