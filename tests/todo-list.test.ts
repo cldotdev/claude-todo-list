@@ -11,11 +11,8 @@ import {
   REVIEW_TURNS,
   TRANSCRIPT_TEXT,
   TRANSCRIPT_TOOL_RESULT_TEXT,
-  pageFor,
   pageRows,
   rowWindow,
-  windowFor,
-  windowSize,
   wrapRows,
 } from '../hooks/list'
 import { STORE_CAP, STORE_TARGET, parseKey, storeLength } from '../hooks/store'
@@ -751,15 +748,17 @@ test('focus moves scroll the window by the least distance', async ($, on) => {
   await band.unmount()
 })
 
+const ones = (length: number) => Array.from({ length }, () => 1)
+
 test('paging stays full, moves by up to 10 items, and keeps the focus row', () => {
-  expect(pageFor(25, 0, 4, 1, 10)).toEqual({ start: 10, index: 14 })
-  expect(pageFor(25, 10, 14, 1, 10)).toEqual({ start: 15, index: 19 })
-  expect(pageFor(25, 15, 19, 1, 10)).toBeNull()
-  expect(pageFor(25, 5, 7, -1, 10)).toEqual({ start: 0, index: 2 })
-  expect(pageFor(25, 0, 4, -1, 10)).toBeNull()
-  expect(pageFor(7, 0, 3, 1, 10)).toBeNull()
+  expect(pageRows(ones(25), 0, 4, 1, 11, 10)).toEqual({ start: 10, index: 14 })
+  expect(pageRows(ones(25), 10, 14, 1, 11, 10)).toEqual({ start: 15, index: 19 })
+  expect(pageRows(ones(25), 15, 19, 1, 11, 10)).toBeNull()
+  expect(pageRows(ones(25), 5, 7, -1, 11, 10)).toEqual({ start: 0, index: 2 })
+  expect(pageRows(ones(25), 0, 4, -1, 11, 10)).toBeNull()
+  expect(pageRows(ones(7), 0, 3, 1, 11, 10)).toBeNull()
   // A stale start is read as the window drawn around the focus.
-  expect(pageFor(25, 0, 24, -1, 10)).toEqual({ start: 5, index: 14 })
+  expect(pageRows(ones(25), 0, 24, -1, 11, 10)).toEqual({ start: 5, index: 14 })
 })
 
 test('the paging keys change nothing at an edge of the list', async ($, on) => {
@@ -1580,17 +1579,25 @@ test('/clear deletes every key of the session, legacy or new', async ($, on) => 
   expect([...map.keys()]).toEqual(['session:other:1000:50'])
 })
 
-test('the window size fits the rows and reserves the more row', () => {
-  expect(windowSize(20, 7, 3)).toBe(7)
-  expect(windowSize(8, 7, 3)).toBe(4)
-  expect(windowSize(8, 25, 3)).toBe(4)
-  expect(windowSize(3, 25, 3)).toBe(1)
-  expect(windowSize(1, 25, 3)).toBe(1)
-  expect(windowSize(20, 25, 3, 10)).toBe(10)
-  expect(windowSize(40, 25, 2)).toBe(25)
-  expect(windowSize(12, 25, 2)).toBe(9)
-  expect(windowSize(30, 12, 3, 10)).toBe(10)
-  expect(windowSize(5, 0, 3)).toBe(0)
+test('a uniform window fits the rows and reserves the more row', () => {
+  const count = (length: number, rows: number, cap?: number) => rowWindow(ones(length), 0, -1, rows, cap).count
+  expect(count(7, 17)).toBe(7)
+  expect(count(7, 5)).toBe(4)
+  expect(count(25, 5)).toBe(4)
+  expect(count(25, 0)).toBe(1)
+  expect(count(25, -2)).toBe(1)
+  expect(count(25, 17, 10)).toBe(10)
+  expect(count(25, 38)).toBe(25)
+  expect(count(25, 10)).toBe(9)
+  expect(count(12, 27, 10)).toBe(10)
+  expect(count(0, 2)).toBe(0)
+})
+
+test('a cap limits the window even when more rows are free', () => {
+  expect(rowWindow(ones(25), 0, -1, 40, 4)).toEqual({ start: 0, count: 4 })
+  expect(rowWindow(ones(25), 24, -1, 40, 4)).toEqual({ start: 21, count: 4 })
+  expect(pageRows(ones(25), 0, 1, 1, 40, 4)).toEqual({ start: 4, index: 5 })
+  expect(pageRows(ones(25), 4, 6, -1, 40, 4)).toEqual({ start: 0, index: 2 })
 })
 
 test('the wrap counter breaks Latin text at spaces and wide characters anywhere', () => {
@@ -1605,12 +1612,13 @@ test('the wrap counter breaks Latin text at spaces and wide characters anywhere'
 })
 
 test('the window and paging helpers take the window size', () => {
-  expect(windowFor(25, 0, 5, 4)).toBe(2)
-  expect(windowFor(25, 20, -1, 4)).toBe(20)
-  expect(windowFor(25, 24, -1, 4)).toBe(21)
-  expect(pageFor(25, 0, 1, 1, 4)).toEqual({ start: 4, index: 5 })
-  expect(pageFor(25, 21, 23, 1, 4)).toBeNull()
-  expect(pageFor(25, 4, 6, -1, 4)).toEqual({ start: 0, index: 2 })
+  const list = ones(25)
+  expect(rowWindow(list, 0, 5, 5, 4).start).toBe(2)
+  expect(rowWindow(list, 20, -1, 5, 4).start).toBe(20)
+  expect(rowWindow(list, 24, -1, 5, 4).start).toBe(21)
+  expect(pageRows(list, 0, 1, 1, 5, 4)).toEqual({ start: 4, index: 5 })
+  expect(pageRows(list, 21, 23, 1, 5, 4)).toBeNull()
+  expect(pageRows(list, 4, 6, -1, 5, 4)).toEqual({ start: 0, index: 2 })
 })
 
 // Wide enough for the focused help line to fit on one row.

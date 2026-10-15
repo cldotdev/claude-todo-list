@@ -25,12 +25,9 @@ import {
   refreshPrompt,
   renderTranscript,
   removedTitles,
-  pageFor,
   pageRows,
   reviewPrompt,
   rowWindow,
-  windowFor,
-  windowSize,
   wrapRows,
 } from './list'
 import {
@@ -245,21 +242,21 @@ const paneView = ($: EngineInterface): View => ({
   focusIndex: { get: () => read($, paneFocusIndex), set: next => update($, paneFocusIndex, next) },
 })
 
-// The window size each view last drew. Key handlers cannot see the rows a
-// render was given.
-const drawnSizes = new Map<View['kind'], number>()
-const sizeOf = (view: View) => drawnSizes.get(view.kind) ?? WINDOW_SIZE
+// What each view last drew, for its row-based window; key handlers cannot see
+// the render's props. `titles` and `details` hold each item's title rows and
+// the rows its detail would take expanded (empty for the band, whose items are
+// one row each), `rows` the rows left for items, `cap` the most items a window
+// holds. Until a view draws, a window of the band's size and the `<n> more` row.
+type Drawn = { titles: number[]; details: number[]; rows: number; cap: number }
+const undrawn = (cap: number): Drawn => ({ titles: [], details: [], rows: WINDOW_SIZE + 1, cap })
+const drawn: Record<ViewKind, Drawn> = { band: undrawn(WINDOW_SIZE), pane: undrawn(Infinity) }
 
-// What the pane last drew, for its row-based window: each item's title rows,
-// the rows its detail would take expanded, and the rows left for items.
-type PaneDrawn = { titles: number[]; details: number[]; rows: number }
-// Until the pane draws, a window of the band's size and the `<n> more` row.
-let paneDrawn: PaneDrawn = { titles: [], details: [], rows: WINDOW_SIZE + 1 }
-
-// Item heights with the detail expanded on the item titled `expandedTitle` ('' for none).
-// An item past the drawn list counts as one row.
-const paneHeights = (list: readonly TodoItem[], expandedTitle: string) =>
-  list.map((one, i) => (paneDrawn.titles[i] ?? 1) + (one.title === expandedTitle ? (paneDrawn.details[i] ?? 0) : 0))
+// The view's item heights with the detail expanded on the item titled
+// `expandedTitle` ('' for none). An item past the drawn list counts as one row.
+const heightsOf = (view: View, list: readonly TodoItem[], expandedTitle: string) => {
+  const { titles, details } = drawn[view.kind]
+  return list.map((one, i) => (titles[i] ?? 1) + (one.title === expandedTitle ? (details[i] ?? 0) : 0))
+}
 
 // Whether a turn is running, as the band last saw it. The pane gets no such prop.
 let isWorking = false
@@ -574,17 +571,13 @@ async function focusItem($: EngineInterface, view: View, index: number) {
   }
   const current = await focusOf(view, list)
   await setFocus(view, item.title, index)
+  const { rows, cap } = drawn[view.kind]
+  // The pane's expansion moves with the focus, so the heights differ before and after.
+  const heightsBefore = heightsOf(view, list, shownTitle)
+  const heightsAfter = shownTitle === '' ? heightsBefore : heightsOf(view, list, item.title)
   // Start from the window as drawn, which clamps a stale start.
-  let scrolled: number
-  if (view.kind === 'pane') {
-    // The expansion moves with the focus, so the heights differ before and after.
-    const { rows } = paneDrawn
-    const drawn = rowWindow(paneHeights(list, shownTitle), start, current, rows)
-    scrolled = rowWindow(paneHeights(list, shownTitle === '' ? '' : item.title), drawn.start, index, rows).start
-  } else {
-    const size = sizeOf(view)
-    scrolled = windowFor(list.length, windowFor(list.length, start, current, size), index, size)
-  }
+  const before = rowWindow(heightsBefore, start, current, rows, cap)
+  const scrolled = rowWindow(heightsAfter, before.start, index, rows, cap).start
   if (scrolled !== start) {
     await view.windowStart.set(() => scrolled)
   }
@@ -619,12 +612,8 @@ async function movePage($: EngineInterface, view: View, step: 1 | -1) {
   const index = await focusOf(view, list)
   // The band's detail replaces the list; the pane's sits inside it.
   const canPage = index !== -1 && (view.kind === 'pane' || shownTitle === '')
-  let page: { start: number; index: number } | null = null
-  if (canPage && view.kind === 'pane') {
-    page = pageRows(paneHeights(list, shownTitle), start, index, step, paneDrawn.rows)
-  } else if (canPage) {
-    page = pageFor(list.length, start, index, step, sizeOf(view))
-  }
+  const { rows, cap } = drawn[view.kind]
+  const page = canPage ? pageRows(heightsOf(view, list, shownTitle), start, index, step, rows, cap) : null
   if (page === null) {
     return
   }
@@ -1337,14 +1326,28 @@ export const register: Register = on => {
     const numberWidth = labelWidth(list.length)
     const focusIndex = resolveFocus(list, current)
     const {
-      window: { count: size },
+      window: { start: first, count: size },
       help,
     } = fitWindow({
       columns,
       length: list.length,
       // The rule and the heading.
       fixedRows: 2 + extraTitleRows(list[focusIndex]?.title, columns, numberWidth),
-      fit: others => ({ count: windowSize(e.props.maxRows, list.length, others, WINDOW_SIZE) }),
+      fit: others => {
+        const rows = e.props.maxRows - others
+        // A window that leaves items out keeps its size at the end of the list,
+        // where it would have a spare row for one more.
+        const isWhole = list.length <= WINDOW_SIZE && list.length <= rows
+        const cap = isWhole ? WINDOW_SIZE : Math.max(1, Math.min(WINDOW_SIZE, rows - 1))
+        drawn.band = { titles: [], details: [], rows, cap }
+        return rowWindow(
+          list.map(() => 1),
+          storedStart,
+          focusIndex,
+          rows,
+          cap,
+        )
+      },
       helpFor: hasPages =>
         helpLine({
           kind: 'band',
@@ -1355,8 +1358,6 @@ export const register: Register = on => {
           hasPages,
         }),
     })
-    drawnSizes.set('band', size)
-    const first = windowFor(list.length, storedStart, focusIndex, size)
     const after = Math.max(0, list.length - first - size)
 
     return (
@@ -1482,7 +1483,7 @@ export const register: Register = on => {
       fixedRows: 1,
       fit: others => {
         const rows = e.props.scroll.bodyRows - others
-        paneDrawn = { titles, details, rows }
+        drawn.pane = { titles, details, rows, cap: Infinity }
         return rowWindow(heights, storedStart, focusIndex, rows)
       },
       helpFor: hasPages =>
