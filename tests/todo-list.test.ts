@@ -2372,13 +2372,14 @@ test('/clear waits for a running save, so the save cannot bring a key back', asy
   await start($)
   const turned = turn($, clock, {})
   await isSetting
-  const ended = $.session.end({ reason: 'clear', sessionId: 's1' } as never)
-  // Without the wait, the clear deletes the keys well inside this time and the
-  // save then writes its key back.
-  const isEndedFirst = await Promise.race([
-    ended.then(() => true),
-    new Promise<boolean>(resolve => setTimeout(() => resolve(false), 50)),
-  ])
+  let isEnded = false
+  const ended = $.session.end({ reason: 'clear', sessionId: 's1' } as never).then(() => {
+    isEnded = true
+  })
+  // Without the wait, the clear deletes the keys while the save is held, and
+  // the save then writes its key back.
+  await clock.advance(0)
+  const isEndedFirst = isEnded
   release()
   await Promise.all([turned, ended])
   expect([...map.keys()]).toEqual([])
