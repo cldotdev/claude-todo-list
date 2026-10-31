@@ -56,7 +56,7 @@ The mod SHALL keep a view mode, band or pane, for the session only and never sav
 
 ### Requirement: The Default View Setting Opens the Pane at Session Start
 
-The plugin SHALL declare a `default_view` user setting, a string with the options `band` and `pane` and the default `band`, which `/config` shows as `todo-list.default_view`. When a session starts or is resumed, the mod SHALL read the setting with `$.config.list()` and, when it is `pane`, open the pane without asking for the keys, so the first letters typed into the prompt box are not taken as the pane's keys, also while the list is empty. A missing row, an unreadable list of rows, or any other value SHALL leave the band. When the engine does not draw the pane, such as in a terminal too narrow for a pane nobody asked for, the band SHALL stay. The setting SHALL apply only at the first session start of the process: a hot reload of the mod, which runs `session.start` again, SHALL NOT apply it again, and `/clear`, which raises no `session.start`, SHALL NOT either. A change made in `/config` during a session SHALL take effect at the next session start; `t` switches at once.
+The plugin SHALL declare a `default_view` user setting, a string with the options `band` and `pane` and the default `band`, which `/config` shows as `todo-list.default_view`. When a session starts or is resumed, the mod SHALL read the setting with `$.config.list()` and, when it is `pane`, open the pane without asking for the keys, so the first letters typed into the prompt box are not taken as the pane's keys, also while the list is empty. A missing row, an unreadable list of rows, or any other value SHALL leave the band. When the engine does not draw the pane, such as in a terminal too narrow for a pane nobody asked for, the band SHALL stay. The setting SHALL apply at the first session start of the process and when an in-process `/resume` switches to another session, which raises no `session.start`: after the resumed list loads, `pane` SHALL open the pane without the keys and `band` SHALL close an open pane so the band comes back. A hot reload of the mod, which runs `session.start` again, SHALL NOT apply it again, and `/clear` SHALL NOT either. A change made in `/config` during a session SHALL take effect at the next session start; `t` switches at once.
 
 #### Scenario: A Pane Default Opens the Pane at Start
 
@@ -82,6 +82,16 @@ The plugin SHALL declare a `default_view` user setting, a string with the option
 
 - **WHEN** `default_view` is `pane` and the user runs `/clear`
 - **THEN** the mod does not ask to open the pane again
+
+#### Scenario: A Resume Applies the Default View
+
+- **WHEN** the pane is open, `default_view` is `band`, and an in-process `/resume` switches to another session
+- **THEN** the pane closes and the band shows the resumed session's list
+
+#### Scenario: A Resume Opens the Pane for a Pane Default
+
+- **WHEN** `default_view` is `pane` and an in-process `/resume` switches to another session
+- **THEN** the pane opens without asking for the keys
 
 ### Requirement: The T Key Switches Back to the Band
 

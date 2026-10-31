@@ -101,9 +101,38 @@ An entry under the legacy key `session:<session id>` SHALL be read once, saved u
 
 ### Requirement: Clearing a Session Removes All Its Keys
 
-Claude Code's `/clear` SHALL remove every key of the session, legacy or new.
+Claude Code's `/clear` SHALL remove every key of the session, legacy or new. A save already running at the `/clear` SHALL finish before the keys are removed, so no key of the session is written afterwards.
 
 #### Scenario: Clear Removes Duplicate Keys
 
 - **WHEN** the store holds `session:a:1000:50` and `session:a:2000:60` and session `a` runs `/clear`
 - **THEN** the store holds no key for session `a`
+
+#### Scenario: A Save Running at Clear Does Not Bring a Key Back
+
+- **WHEN** a save of session `a` is still writing its key as session `a` runs `/clear`
+- **THEN** the `/clear` waits for the save, and afterwards the store holds no key for session `a`
+
+### Requirement: An In-Process Resume Switches to the Resumed Session's Entry
+
+When `/resume` switches the running process to another session, which raises `session.end` with the reason `resume` for the ending session and no second `session.start`, the mod SHALL empty the in-memory list, trash, review window, pending turns, and pane state of the ending session, without deleting any of its store keys. A save already running at that point SHALL finish under the ending session first. The mod SHALL load the resumed session's newest entry only once `$.session.id()` differs from the ending session's id, and only once, however many hooks ask for it, before any `/todos` command, prompt submit, or turn completion acts on the list. Until the id differs, the mod SHALL load nothing. No save SHALL write the ending session's list under the resumed session's id. A turn whose list update was still being applied at the resume SHALL be dropped.
+
+#### Scenario: Resume Loads the Resumed Session's List and Trash
+
+- **WHEN** session `s1` started with nothing saved, the user runs `/resume`, and the resumed session `s2` has a saved list of 1 item and 1 trash entry
+- **THEN** `/todos` lists `s2`'s item and `/todos trash` lists its trash entry
+
+#### Scenario: Resume Does Not Write the Old List Under the New Id
+
+- **WHEN** session `s1` holds a saved list, the user runs `/resume` to session `s2` with nothing saved, and a turn then adds an item
+- **THEN** the list holds only that item, `s1`'s key is unchanged, and the only new key is `s2`'s
+
+#### Scenario: Nothing Loads Before the Id Switches
+
+- **WHEN** the resume has ended `s1` but `$.session.id()` still answers `s1`
+- **THEN** the mod loads nothing and keeps waiting for the switch
+
+#### Scenario: A Turn Being Applied at Resume Is Dropped
+
+- **WHEN** a turn's reply is still being applied as the user runs `/resume`
+- **THEN** its items are not added to the list of the resumed session

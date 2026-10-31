@@ -57,9 +57,12 @@ function setup(
   const closed: unknown[] = []
   // What the next `$.ui.open` answers; a test sets it false for a surface without panes.
   const placement = { isPlaced: true }
+  // What `$.session.id()` answers; a test changes it to mimic an in-process /resume.
+  const session = { id: 's1' }
   const clock = mock.clock(on)
   store(on, stored)
   on('session.start', () => ({ cwd: '/tmp' }))
+  on('session.end', (_$, e) => e as never)
   on('turn.complete', () => ({ text: 'reply' }))
   on('turn.start', () => ({ turnId: 't1' }))
   on('prompt.submit', (_$, e) => {
@@ -90,7 +93,7 @@ function setup(
   })
   on('prompt.edit', (_$, e) => e as never)
   on('ui.render', $ => h($.ui.resolve(BAND).Text, null, 'engine band') as never)
-  on('session.id', () => ({ value: 's1' }))
+  on('session.id', () => ({ value: session.id }))
   on('settings.read', () => ({ value: settings }))
   on('ui.focus', (_$, e) => {
     landed.push(e.element)
@@ -106,7 +109,7 @@ function setup(
     models.push(e.model)
     return nextReply(replies)
   })
-  return { asked, models, clock, filled, landed, ran, submitted, toasts, logs, opened, closed, placement }
+  return { asked, models, clock, filled, landed, ran, submitted, toasts, logs, opened, closed, placement, session }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -1360,7 +1363,10 @@ function fakeStore(failSet: (key: string, setCount: number) => string | null = (
     for (const [key, value] of Object.entries(entries)) {
       map.set(key, value)
     }
-    on('store.get', (_$, e) => ({ value: map.get(e.key) as never }))
+    on('store.get', (_$, e) => {
+      calls.get.push(e.key)
+      return { value: map.get(e.key) as never }
+    })
     on('store.set', (_$, e) => {
       calls.set.push(e.key)
       const message = failSet(e.key, calls.set.length)
@@ -1576,7 +1582,6 @@ test('/clear deletes every key of the session, legacy or new', async ($, on) => 
     'session:s1': storedList('a', 500),
     'session:other:1000:50': storedList('o', 1000),
   }, ALL_AGES)
-  on('session.end', (_$, e) => e as never)
   await $.session.end({ reason: 'clear', sessionId: 's1' } as never)
   expect([...map.keys()]).toEqual(['session:other:1000:50'])
 })
@@ -1805,7 +1810,6 @@ test('t on the pane redraws the band that stayed mounted', async ($, on) => {
 })
 
 test('/clear clears the pane but keeps the pane mode', async ($, on) => {
-  on('session.end', (_$, e) => e as never)
   const ctx = setup(on, [answered(listOf(5)), answered(listOf(5))])
   await start($)
   await turn($, ctx.clock, {})
@@ -1900,7 +1904,6 @@ test('the pane keeps its own focus and selection apart from the band', async ($,
 })
 
 test('clearing the session clears the pane atoms', async ($, on) => {
-  on('session.end', (_$, e) => e as never)
   const ctx = setup(on, [answered(listOf(5)), answered(listOf(5))])
   await start($)
   await turn($, ctx.clock, {})
@@ -2045,7 +2048,6 @@ const defaultViewRow = (value: string) => ({
 async function startedWith($: Engine, on: On, value: string, json = listOf(3)) {
   const ctx = setup(on, [answered(json)])
   on('config.list', () => ({ value: [defaultViewRow(value)] }) as never)
-  on('session.end', (_$, e) => e as never)
   await start($)
   await turn($, ctx.clock, {})
   return ctx
@@ -2219,4 +2221,166 @@ test('the pane help line names the paging keys while the rows cannot hold the li
   expect(await helpOf(tall)).not.toContain('n/p page')
   expect((await windowOf(tall)).numbers).toEqual(range(1, WRAPPED_ROWS))
   await tall.unmount()
+})
+
+// In-process /resume
+
+const resumeEnd = ($: Engine) => $.session.end({ reason: 'resume', sessionId: 's1' } as never)
+// Ends s1 with a resume, then lets $.session.id() answer the resumed s2.
+async function resumeTo($: Engine, session: { id: string }) {
+  await resumeEnd($)
+  session.id = 's2'
+}
+
+test('an in-process resume loads the resumed session list and trash', async ($, on) => {
+  const second = { ...storedList('two', 2000), trash: [entry('gone', 'user')] }
+  const { clock, session } = setupStored(on, [], { [keyOf('s2', second)]: second }, ALL_AGES)
+  await start($)
+  expect(await run($, '')).toBe('No open items.')
+  await resumeTo($, session)
+  await clock.advance(0)
+  expect(await run($, '')).toBe('Todos\n1. two')
+  expect(await run($, 'trash')).toBe('Trash\n1. gone [user]\n   d-gone')
+})
+
+test('an in-process resume to a session with nothing saved empties the list and leaves the old keys', async ($, on) => {
+  const first = storedList('one', 1000)
+  const { clock, map, session } = setupStored(on, [adding('b')], { [keyOf('s1', first)]: first }, ALL_AGES)
+  await start($)
+  expect(await run($, '')).toBe('Todos\n1. one')
+  await resumeTo($, session)
+  expect(await run($, '')).toBe('No open items.')
+  expect([...map.keys()]).toEqual([keyOf('s1', first)])
+  await turn($, clock, {})
+  expect(await run($, '')).toBe('Todos\n1. b\n   d-b')
+  expect(map.has(keyOf('s1', first))).toBe(true)
+  expect([...map.keys()].filter(key => key.startsWith('session:s2:'))).toHaveLength(1)
+})
+
+test('nothing loads before the session id switches', async ($, on) => {
+  const second = storedList('two', 2000)
+  const { clock, session } = setupStored(on, [], { [keyOf('s2', second)]: second }, ALL_AGES)
+  await start($)
+  await resumeEnd($)
+  await clock.advance(0)
+  expect(await run($, '')).toBe('No open items.')
+  expect(await run($, '')).toBe('No open items.')
+  session.id = 's2'
+  expect(await run($, '')).toBe('Todos\n1. two')
+})
+
+test('the resumed list loads once however many callers arrive together', async ($, on) => {
+  const second = storedList('two', 2000)
+  const { calls, session } = setupStored(on, [], { [keyOf('s2', second)]: second }, ALL_AGES)
+  await start($)
+  calls.get.length = 0
+  await resumeTo($, session)
+  await Promise.all([run($, ''), run($, ''), run($, '')])
+  expect(calls.get).toEqual([keyOf('s2', second)])
+})
+
+test('an in-process resume applies the default view over the open state', async ($, on) => {
+  const second = storedList('two', 2000)
+  const ctx = setupStored(on, [], { [keyOf('s2', second)]: second }, ALL_AGES)
+  on('config.list', () => ({ value: [defaultViewRow('band')] }) as never)
+  await start($)
+  await run($, 'pane')
+  await expectBandHidden($)
+  await resumeTo($, ctx.session)
+  await run($, '')
+  expect(ctx.closed).toMatchObject([{ id: PANE_ID }])
+  await expectBandShown($)
+})
+
+test('an in-process resume opens the pane without keys when the default view is pane', async ($, on) => {
+  const ctx = setup(on, [])
+  on('config.list', () => ({ value: [defaultViewRow('pane')] }) as never)
+  await start($)
+  expect(ctx.opened).toHaveLength(1)
+  await resumeTo($, ctx.session)
+  await run($, '')
+  expect(ctx.opened).toEqual([
+    { id: PANE_ID, title: 'Todos' },
+    { id: PANE_ID, title: 'Todos' },
+  ])
+})
+
+test('an in-process resume clears the pane state', async ($, on) => {
+  const second = storedList('two', 2000)
+  const ctx = setupStored(on, [answered(listOf(25))], { [keyOf('s2', second)]: second }, ALL_AGES)
+  on('config.list', () => ({ value: [defaultViewRow('pane')] }) as never)
+  await start($)
+  await turn($, ctx.clock, {})
+  const pane = await paneAt($, 12)
+  await focusPane($, 2)
+  await pane.press({ key: 'select' })
+  await pane.press({ key: 'details' })
+  expect(await helpOf(pane)).toContain('paste 1')
+  await pane.unmount()
+  await resumeTo($, ctx.session)
+  await run($, '')
+  const again = await paneAt($, 12)
+  const help = await helpOf(again)
+  expect(help).toContain('v paste')
+  expect(help).not.toContain('paste 1')
+  expect(help).toContain('o/Enter expand')
+  await again.unmount()
+})
+
+test('a turn still being applied at an in-process resume is dropped', async ($, on) => {
+  const ctx = setup(on, [{ ...answered(listOf(3)), during: async () => resumeEnd($) }])
+  await start($)
+  await turn($, ctx.clock, {})
+  ctx.session.id = 's2'
+  expect(await run($, '')).toBe('No open items.')
+})
+
+test('a band render after an in-process resume loads the resumed list', async ($, on) => {
+  const second = storedList('two', 2000)
+  const { clock, session } = setupStored(on, [], { [keyOf('s2', second)]: second }, ALL_AGES)
+  await start($)
+  await resumeTo($, session)
+  expect((await shown($)).texts).toEqual(['engine band'])
+  await clock.advance(0)
+  expect((await shown($)).texts.map(one => one.trim())).toContain('two')
+})
+
+test('/clear waits for a running save, so the save cannot bring a key back', async ($, on) => {
+  const map = new Map<string, unknown>()
+  let release = () => {}
+  const gate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  let enter = () => {}
+  const isSetting = new Promise<void>(resolve => {
+    enter = resolve
+  })
+  const { clock } = setup(on, [adding('a')], {}, ALL_AGES, kit => {
+    kit('store.get', (_$, e) => ({ value: map.get(e.key) as never }))
+    kit('store.set', async (_$, e) => {
+      enter()
+      await gate
+      map.set(e.key, e.value)
+      return { value: undefined }
+    })
+    kit('store.delete', (_$, e) => {
+      map.delete(e.key)
+      return { value: undefined }
+    })
+    kit('store.keys', () => ({ value: [...map.keys()] }))
+  })
+  await start($)
+  const turned = turn($, clock, {})
+  await isSetting
+  const ended = $.session.end({ reason: 'clear', sessionId: 's1' } as never)
+  // Without the wait, the clear deletes the keys well inside this time and the
+  // save then writes its key back.
+  const isEndedFirst = await Promise.race([
+    ended.then(() => true),
+    new Promise<boolean>(resolve => setTimeout(() => resolve(false), 50)),
+  ])
+  release()
+  await Promise.all([turned, ended])
+  expect([...map.keys()]).toEqual([])
+  expect(isEndedFirst).toBe(false)
 })

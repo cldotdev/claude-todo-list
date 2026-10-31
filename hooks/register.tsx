@@ -187,7 +187,8 @@ async function maxAgeMs($: EngineInterface): Promise<number | null> {
 const userTexts = new Map<string, string>()
 // Runs list updates one at a time, so two turns never race.
 let queue: Promise<unknown> = Promise.resolve()
-// Bumped by /clear so a job that started before it drops its result.
+// Bumped when /clear or /resume ends the session, so a job that started before
+// it drops its result.
 let generation = 0
 // Whether a leave check is scheduled, so focus moves start only one.
 let isWatchingLeave = false
@@ -935,6 +936,90 @@ async function sweep($: EngineInterface, currentId: string): Promise<SavedKey | 
   return kept.find(one => one.id === currentId) ?? null
 }
 
+async function loadSaved($: EngineInterface, id: string) {
+  const mine = await sweep($, id)
+  if (mine === null) {
+    return
+  }
+  await update($, savedKey, () => mine.key)
+  const stored = await $.store.get(mine.key)
+  if (isStored(stored)) {
+    await update($, items, () => migrate(stored.items))
+    await update($, trash, () => loadTrash(stored))
+  }
+}
+
+// Empties the in-memory state of the session that is ending, leaving the store
+// alone. No model reply commits from here on, and a save already running
+// finishes under the ending session first, so it cannot write a key after the
+// reset or after /clear deletes the session's keys.
+async function resetSession($: EngineInterface) {
+  generation += 1
+  await saves
+  userTexts.clear()
+  await update($, lastAnswer, () => '')
+  await update($, pending, () => [])
+  await update($, items, () => [])
+  await update($, trash, () => [])
+  await update($, review, () => [])
+  await update($, detailed, () => '')
+  await update($, deleting, () => '')
+  await update($, selected, () => [])
+  await clearPane($)
+  await update($, savedKey, () => '')
+}
+
+// A band default closes the pane, which is open here only after a resume.
+async function applyDefaultView($: EngineInterface) {
+  if ((await defaultView($)) === 'pane') {
+    await openPane($, false)
+  } else if ((await read($, mode)) === 'pane') {
+    await closePane($)
+  }
+}
+
+// The id of the session an in-process /resume left, '' while none is waiting to
+// be replaced. Only $.session.id() reveals the session the process continues
+// under, so the resumed list loads once that id differs from this one.
+let resumedFrom = ''
+let adopting: Promise<void> | null = null
+let isAdoptScheduled = false
+
+// Callers that arrive while a load runs wait for it. With no resume waiting, it
+// returns before any await, so the normal path keeps its microtask order.
+function adoptResumed($: EngineInterface): Promise<void> {
+  if (resumedFrom === '') {
+    return Promise.resolve()
+  }
+  adopting ??= (async () => {
+    try {
+      const id = await $.session.id()
+      if (resumedFrom === '' || id === resumedFrom) {
+        return
+      }
+      resumedFrom = ''
+      await loadSaved($, id)
+      await applyDefaultView($)
+    } finally {
+      adopting = null
+    }
+  })()
+  return adopting
+}
+
+// The load reads the store and may open or close the pane, so a timer runs it
+// outside the render.
+function scheduleAdopt($: EngineInterface) {
+  if (isAdoptScheduled || resumedFrom === '') {
+    return
+  }
+  isAdoptScheduled = true
+  $.clock.after(0, () => {
+    isAdoptScheduled = false
+    void adoptResumed($)
+  })
+}
+
 type Elements = ReturnType<EngineInterface['ui']['resolve']>
 
 // Opening an open pane only retitles it, but its focus request is still
@@ -1072,8 +1157,7 @@ export const register: Register = on => {
       argumentHint: '[refresh|clear|pane|reset|trash|restore <numbers>|purge <numbers>|delete <numbers>|<prompt>]',
     })
 
-    const id = await $.session.id()
-    const mine = await sweep($, id)
+    await loadSaved($, await $.session.id())
 
     await update($, focused, () => '')
     await update($, deleting, () => '')
@@ -1081,41 +1165,23 @@ export const register: Register = on => {
       schedulePending($)
     }
 
-    if (mine !== null) {
-      await update($, savedKey, () => mine.key)
-      const stored = await $.store.get(mine.key)
-      if (isStored(stored)) {
-        await update($, items, () => migrate(stored.items))
-        await update($, trash, () => loadTrash(stored))
-      }
-    }
-
     // Only the first start of the process applies the default view: a reload
     // runs this hook again, and /clear fires no start at all.
     if (!(await read($, viewApplied))) {
       await update($, viewApplied, () => true)
-      if ((await defaultView($)) === 'pane') {
-        await openPane($, false)
-      }
+      await applyDefaultView($)
     }
 
     return next(e)
   })
 
   on('session.end', async ($, e, next) => {
+    if (e.reason === 'resume') {
+      await resetSession($)
+      resumedFrom = e.sessionId
+    }
     if (e.reason === 'clear') {
-      generation += 1
-      userTexts.clear()
-      await update($, lastAnswer, () => '')
-      await update($, pending, () => [])
-      await update($, items, () => [])
-      await update($, trash, () => [])
-      await update($, review, () => [])
-      await update($, detailed, () => '')
-      await update($, deleting, () => '')
-      await update($, selected, () => [])
-      await clearPane($)
-      await update($, savedKey, () => '')
+      await resetSession($)
       for (const key of await $.store.keys()) {
         if ((parseKey(key)?.id ?? legacyId(key)) === e.sessionId) {
           await $.store.delete(key)
@@ -1134,6 +1200,7 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    await adoptResumed($)
     await leave($)
 
     return next(e)
@@ -1150,7 +1217,8 @@ export const register: Register = on => {
     userTexts.delete(e.turnId)
 
     if (e.agentId === undefined && e.reason === 'answer') {
-      const turn = { previousAnswer: await read($, lastAnswer), userText, answer: e.answer }
+      await adoptResumed($)
+      const turn ={ previousAnswer: await read($, lastAnswer), userText, answer: e.answer }
       await update($, lastAnswer, () => e.answer)
       await update($, pending, turns => [...turns, turn])
       schedulePending($)
@@ -1160,6 +1228,7 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'todos' }, async ($, e) => {
+    await adoptResumed($)
     const arg = e.args.trim()
 
     if (arg === 'refresh') {
@@ -1311,6 +1380,7 @@ export const register: Register = on => {
     // Recorded before any early return, so the pane's ask key sees it even
     // while the band draws nothing.
     isWorking = e.props.isWorking
+    scheduleAdopt($)
     const [isPaneMode, list, current, openTitle, armed, selectedTitles, storedStart] = await Promise.all([
       read($, mode).then(one => one === 'pane'),
       read($, items),
@@ -1447,6 +1517,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
     const isHeld = e.props.isFocused
     isPaneHeld = isHeld
+    scheduleAdopt($)
     const [list, current, storedIndex, openTitle, armed, selectedTitles, storedStart] = await Promise.all([
       read($, items),
       read($, paneFocused),
