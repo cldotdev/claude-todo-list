@@ -92,7 +92,10 @@ pane 把事項列在獨立的 pane 裡。全螢幕模式下，終端機寬度達
 ```bash
 claude plugin validate .
 claude plugin test .
+scripts/test-min-version.sh
 ```
+
+`scripts/test-min-version.sh` 會透過 `npx`，用 mod 支援的最低 Claude Code 版本 (也就是 CI 固定測試的版本) 執行嚴格模式的驗證和測試。第一次執行時會先下載這個版本。
 
 要試用本機的修改，啟動 Claude Code 時載入 clone，只對這個 session 有效：
 

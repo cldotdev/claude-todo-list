@@ -92,7 +92,10 @@ The pane lists the items in a pane of its own, which Claude Code docks beside th
 ```bash
 claude plugin validate .
 claude plugin test .
+scripts/test-min-version.sh
 ```
+
+`scripts/test-min-version.sh` runs the strict validation and the tests on the oldest Claude Code version the mod supports, the one CI pins, through `npx`. The first run downloads that version.
 
 To try local changes, start Claude Code with the clone loaded for that session:
 
