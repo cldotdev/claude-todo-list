@@ -7,6 +7,7 @@ import {
   MAX_DETAIL_LENGTH,
   MAX_TRASH,
   REVIEW_MIN_ITEMS,
+  REVIEW_SYSTEM,
   REVIEW_MIN_TURNS,
   REVIEW_TURNS,
   TRANSCRIPT_TEXT,
@@ -45,6 +46,7 @@ function setup(
   store: (on: On, entries: Record<string, unknown>) => void = mock.store,
 ) {
   const asked: string[] = []
+  const systems: (string | undefined)[] = []
   const models: string[] = []
   const filled: string[] = []
   const submitted: string[] = []
@@ -106,10 +108,11 @@ function setup(
   on('command.register', () => ({ value: { command: 'todos' } }))
   on('model.complete', async (_$, e) => {
     asked.push(e.prompt)
+    systems.push(e.system)
     models.push(e.model)
     return nextReply(replies)
   })
-  return { asked, models, clock, filled, landed, ran, submitted, toasts, logs, opened, closed, placement, session }
+  return { asked, systems, models, clock, filled, landed, ran, submitted, toasts, logs, opened, closed, placement, session }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -2384,4 +2387,138 @@ test('/clear waits for a running save, so the save cannot bring a key back', asy
   await Promise.all([turned, ended])
   expect([...map.keys()]).toEqual([])
   expect(isEndedFirst).toBe(false)
+})
+
+const languageRow = (value: string) => ({
+  key: 'todo-list.language',
+  label: 'Item language',
+  kind: 'text',
+  value,
+  provider: { kind: 'plugin', name: 'todo-list' },
+  isLocked: false,
+})
+
+const WRITE_IN = (language: string) => `Write each title and detail in ${language}.`
+const DETECT_WORDING = 'never the language of these instructions or of the items already on the list'
+const CJK = /[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef\u3000-\u303f]/
+
+// One answered turn with the plugin field and Claude Code's setting as given.
+async function systemWith($: Engine, on: On, plugin: string | undefined, claude: Record<string, unknown> = {}) {
+  const ctx = setup(on, [adding('a')], {}, claude)
+  on('config.list', () => ({ value: plugin === undefined ? [] : [languageRow(plugin)] }) as never)
+  await start($)
+  await turn($, ctx.clock, {})
+  return ctx.systems[0] ?? ''
+}
+
+test('the plugin language field wins over the Claude Code language setting', async ($, on) => {
+  const system = await systemWith($, on, ' zh-TW ', { language: 'English' })
+  expect(system).toContain(WRITE_IN('zh-TW'))
+  expect(system).not.toContain('English.')
+  expect(system).not.toContain(DETECT_WORDING)
+})
+
+test('the Claude Code language setting is used when the plugin field is empty or blank', async ($, on) => {
+  expect(await systemWith($, on, '', { language: ' Japanese ' })).toContain(WRITE_IN('Japanese'))
+})
+
+test('the Claude Code language setting is used when the plugin row is missing', async ($, on) => {
+  expect(await systemWith($, on, undefined, { language: 'French' })).toContain(WRITE_IN('French'))
+})
+
+test('detection wording is used when both languages are unset', async ($, on) => {
+  const system = await systemWith($, on, '  ', { language: '   ' })
+  expect(system).toContain(DETECT_WORDING)
+  expect(system).not.toContain('Write each title and detail in ')
+})
+
+test('a Claude Code language setting that is not a string is ignored', async ($, on) => {
+  expect(await systemWith($, on, '', { language: 7 })).toContain(DETECT_WORDING)
+})
+
+test('a language read that throws falls through and the list still updates', async ($, on) => {
+  const ctx = setup(on, [adding('a')])
+  on('config.list', () => {
+    throw new Error('unreadable')
+  })
+  await start($)
+  await turn($, ctx.clock, {})
+  expect(ctx.systems[0]).toContain(DETECT_WORDING)
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a')
+})
+
+test('a Claude Code settings read that throws falls through to detection', async ($, on) => {
+  let reads = 0
+  const unreadable = {
+    get language(): string {
+      reads += 1
+      throw new Error('unreadable')
+    },
+  }
+  const ctx = setup(on, [adding('a')], {}, unreadable)
+  on('config.list', () => ({ value: [languageRow('')] }) as never)
+  await start($)
+  await turn($, ctx.clock, {})
+  expect(reads).toBeGreaterThan(0)
+  expect(ctx.systems[0]).toContain(DETECT_WORDING)
+  expect(await run($, '')).toBe('Todos\n1. a\n   d-a')
+})
+
+test('a language change applies on the next turn', async ($, on) => {
+  const ctx = setup(on, [adding('a'), answered(NOOP)])
+  let language = 'English'
+  on('config.list', () => ({ value: [languageRow(language)] }) as never)
+  await start($)
+  await turn($, ctx.clock, {})
+  language = 'zh-TW'
+  await turn($, ctx.clock, {})
+  expect(ctx.systems[0]).toContain(WRITE_IN('English'))
+  expect(ctx.systems[1]).toContain(WRITE_IN('zh-TW'))
+})
+
+test('the language reaches the fork refresh prompt, or detection wording without one', async ($, on) => {
+  const ctx = setup(on, [adding('a')], {}, { language: 'Korean' })
+  const forked = mockFork(on, [answered(NOOP), answered(NOOP)])
+  let plugin = 'zh-TW'
+  on('config.list', () => ({ value: [languageRow(plugin)] }) as never)
+  await start($)
+  await turn($, ctx.clock, {})
+  await run($, 'refresh')
+  expect(forked[0]).toContain(WRITE_IN('zh-TW'))
+  plugin = ''
+  await run($, 'refresh')
+  expect(forked[1]).toContain(WRITE_IN('Korean'))
+})
+
+test('the language reaches the transcript refresh prompt', async ($, on) => {
+  const ctx = setup(on, [adding('a'), answered(NOOP)], {}, { language: 'Korean' })
+  mockTranscript(on, [said('user', 'hi')])
+  on('config.list', () => ({ value: [] }) as never)
+  await start($)
+  await turn($, ctx.clock, {})
+  await run($, 'refresh')
+  expect(ctx.asked.at(-1)).toContain(WRITE_IN('Korean'))
+})
+
+test('the refresh prompt falls back to detection wording when no language is set', async ($, on) => {
+  const ctx = setup(on, [adding('a')])
+  const forked = mockFork(on, [answered(NOOP)])
+  await start($)
+  await turn($, ctx.clock, {})
+  await run($, 'refresh')
+  expect(forked[0]).toContain(DETECT_WORDING)
+})
+
+test('the mod\'s own prompts hold no CJK characters', async ($, on) => {
+  const ctx = setup(on, [adding('a')])
+  const forked = mockFork(on, [answered(NOOP)])
+  await start($)
+  await turn($, ctx.clock, {})
+  await run($, 'refresh')
+  const texts = [...ctx.systems, ...ctx.asked, ...forked, REVIEW_SYSTEM]
+  expect(texts.length).toBeGreaterThan(3)
+  for (const text of texts) {
+    expect(text ?? '').not.toMatch(CJK)
+  }
+  expect(ctx.systems[0]).toContain('keep it as the English word "agent"')
 })

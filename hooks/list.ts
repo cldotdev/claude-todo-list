@@ -17,7 +17,7 @@ export const TRANSCRIPT_TOOL_RESULT_TEXT = 2_000
 export const TRANSCRIPT_TEXT = 200_000
 
 const DEFINITION = `An open item is something still pending in this conversation:
-- Work the user or the agent deferred (for example "later", "not now", "先不做", "之後再處理", "next step").
+- Work the user or the agent deferred (for example "later", "not now", "next step").
 - A follow-up the agent promised, or a check it said it had not run yet.
 - A decision or question raised in the discussion and not settled yet, whoever raised it: a choice among options waiting for the user, a question either side asked that has no answer or conclusion yet, or a point left to decide later.
 
@@ -28,23 +28,30 @@ Do not list:
 
 Remove an item once the conversation shows it is done or the user drops it.`
 
-const ITEM_STYLE = `Write each item as an object with a "title" and a "detail", both in the language the agent answers in. Call the side that answers the user "the agent", never "the assistant"; in Chinese, keep it as the English word "agent", lowercase mid-sentence.
+const languageRule = (language?: string) =>
+  language === undefined
+    ? "Write the titles and details in the language of the agent's answers in the conversation or messages given, never the language of these instructions or of the items already on the list."
+    : `Write each title and detail in ${language}.`
+
+const itemStyle = (language?: string) => `Write each item as an object with a "title" and a "detail". ${languageRule(language)} Call the side that answers the user "the agent", never "the assistant"; keep it as the English word "agent" in every language, lowercase mid-sentence.
 - "title": one short line (at most ${MAX_ITEM_LENGTH} characters). Use half-width parentheses with a space before the opening one. End a title that carries a status, such as awaiting the user's reply or not yet tested, with that status in parentheses, written in the title's language, and nothing after it, as in "<what to do> (<status>)".
 - "detail": what to do, why it matters, and which part of the discussion it came from (at most ${MAX_DETAIL_LENGTH} characters, newlines included), so a reader who lost the conversation can act on it. Do not repeat the title. Put each distinct point on its own line, separated by a newline in the JSON string, as plain text with no Markdown bullets or headings.`
 
 const RESOLVE = `For every current item, decide whether this turn resolves it. Remove it when the turn answers it, decides it, completes it, or makes it moot, even when the turn does not name it. A user's reply to a question, or a choice among offered options, resolves that question. Keep an item only when it is still open after this turn.`
 
-const CHANGE_FORMAT = `Reply with a JSON object and nothing else: no code fence, no commentary. "remove" lists the numbers of the current items this turn resolves, and "add" lists the new open items as {"title", "detail"} objects, for example {"remove":[2],"add":[{"title":"<title>","detail":"<detail>"}]}. Reply with {"remove":[],"add":[]} when nothing changed.
-${ITEM_STYLE}`
+const changeFormat = (language?: string) => `Reply with a JSON object and nothing else: no code fence, no commentary. "remove" lists the numbers of the current items this turn resolves, and "add" lists the new open items as {"title", "detail"} objects, for example {"remove":[2],"add":[{"title":"<title>","detail":"<detail>"}]}. Reply with {"remove":[],"add":[]} when nothing changed.
+${itemStyle(language)}`
 
 const REVIEW_RESOLVE = `For every current item, decide whether it is still open at the end of the turns below. Remove it when a later turn answered it, decided it, completed it, dropped it, or made it moot, even when no turn names it, and keep it only when the end of the turns still leaves it open.`
 
 const REVIEW_FORMAT = `Reply with a JSON object and nothing else: no code fence, no commentary. "remove" lists the numbers of the current items that are no longer open, for example {"remove":[2]}. Reply with {"remove":[]} when every item is still open. Do not add items.`
 
-const REFRESH_FORMAT = `Reply with a JSON object and nothing else: no code fence, no commentary. "remove" lists the numbers of the current items that are no longer open, "add" lists open items the list is missing as {"title", "detail"} objects, and "update" lists {"number", "detail"} objects for kept items whose detail is out of date or empty, for example {"remove":[2],"add":[{"title":"<title>","detail":"<detail>"}],"update":[{"number":1,"detail":"<detail>"}]}. An update changes only the detail; a kept item keeps its title. Reply with {"remove":[],"add":[],"update":[]} when nothing changed.
-${ITEM_STYLE}`
+const refreshFormat = (language?: string) => `Reply with a JSON object and nothing else: no code fence, no commentary. "remove" lists the numbers of the current items that are no longer open, "add" lists open items the list is missing as {"title", "detail"} objects, and "update" lists {"number", "detail"} objects for kept items whose detail is out of date or empty, for example {"remove":[2],"add":[{"title":"<title>","detail":"<detail>"}],"update":[{"number":1,"detail":"<detail>"}]}. An update changes only the detail; a kept item keeps its title. Reply with {"remove":[],"add":[],"update":[]} when nothing changed.
+${itemStyle(language)}`
 
-export const SYSTEM = `You maintain a to-do list of open items for a coding conversation.\n\n${DEFINITION}\n\n${RESOLVE}\n\n${CHANGE_FORMAT}`
+// `language` is the language to write items in; undefined asks the model to detect it.
+export const systemPrompt = (language?: string) =>
+  `You maintain a to-do list of open items for a coding conversation.\n\n${DEFINITION}\n\n${RESOLVE}\n\n${changeFormat(language)}`
 
 export const REVIEW_SYSTEM = `You review a to-do list of open items for a coding conversation. You only remove items that are no longer open.\n\n${DEFINITION}\n\n${REVIEW_RESOLVE}\n\n${REVIEW_FORMAT}`
 
@@ -156,10 +163,12 @@ export function refreshPrompt({
   items,
   removed,
   transcript,
+  language,
 }: {
   items: readonly TodoItem[]
   removed: RemovedTitles
   transcript?: string
+  language?: string
 }): string {
   const [head, source] =
     transcript === undefined
@@ -172,7 +181,7 @@ export function refreshPrompt({
     `Current list:\n${numbered(items)}`,
     removedBlocks(removed),
     'Judge each current item from where the conversation ended, and keep it only when the conversation shows it is still open. Also add open items the list is missing.',
-    REFRESH_FORMAT,
+    refreshFormat(language),
   ].join('\n\n')
 }
 

@@ -14,6 +14,12 @@
       "description": "Which view a new or resumed session starts in: the band above the prompt, or the pane beside the transcript. The pane opens only where there is room for it; otherwise the band stays. Takes effect at the next session start.",
       "options": ["band", "pane"],
       "default": "band"
+    },
+    "language": {
+      "type": "string",
+      "title": "Item language",
+      "description": "The language item titles and details are written in, such as English or zh-TW. When empty, it falls back to Claude Code's language setting, then to the language the agent answers in. Takes effect on the next turn; items already on the list keep their language.",
+      "default": ""
     }
   }
 }

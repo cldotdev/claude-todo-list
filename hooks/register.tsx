@@ -8,7 +8,6 @@ import {
   REVIEW_MIN_TURNS,
   REVIEW_SYSTEM,
   REVIEW_TURNS,
-  SYSTEM,
   WINDOW_SIZE,
   type RemovedTitles,
   applyChanges,
@@ -28,6 +27,7 @@ import {
   pageRows,
   reviewPrompt,
   rowWindow,
+  systemPrompt,
   wrapRows,
 } from './list'
 import {
@@ -68,6 +68,7 @@ const PANE_ID = 'todos'
 const PANE_TITLE = 'Todos'
 // The /config row of the plugin's `default_view` userConfig field.
 const DEFAULT_VIEW_KEY = 'todo-list.default_view'
+const LANGUAGE_KEY = 'todo-list.language'
 const NO_DETAIL = '(No detail. Run /todos refresh to add one.)'
 
 // The longest start of `text` that fits in `cells`, with an ellipsis.
@@ -730,9 +731,30 @@ async function ask(
   }
 }
 
-const incremental = ($: EngineInterface, turn: PendingTurn, gen: number) =>
+// The language items are written in: the plugin's `language` setting, else
+// Claude Code's own, else undefined for the model to detect. A read that fails
+// counts as unset. Read on every request, so a change applies on the next turn.
+async function itemLanguage($: EngineInterface): Promise<string | undefined> {
+  const usable = (value: unknown) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined)
+  let own: string | undefined
+  try {
+    own = usable((await $.config.list()).find(one => one.key === LANGUAGE_KEY)?.value)
+  } catch {
+    // Unset.
+  }
+  if (own !== undefined) {
+    return own
+  }
+  try {
+    return usable(await $.settings.read({ key: 'language' }))
+  } catch {
+    return undefined
+  }
+}
+
+const incremental = async ($: EngineInterface, turn: PendingTurn, gen: number) =>
   ask($, gen, {
-    system: SYSTEM,
+    system: systemPrompt(await itemLanguage($)),
     maxTokens: 8192,
     prompt: (sent, removed) => incrementalPrompt({ ...turn, items: sent, removed }),
     apply: applyChanges,
@@ -833,6 +855,7 @@ async function refreshFromTranscript(
   gen: number,
   sent: readonly TodoItem[],
   removed: RemovedTitles,
+  language: string | undefined,
 ): Promise<string> {
   const transcript = renderTranscript(await $.session.messages())
   if (transcript === '') {
@@ -842,7 +865,7 @@ async function refreshFromTranscript(
   const reply = await $.model.complete({
     model,
     effort: 'medium',
-    prompt: refreshPrompt({ items: sent, removed, transcript }),
+    prompt: refreshPrompt({ items: sent, removed, transcript, language }),
     maxTokens: 8192,
     timeoutMs: TRANSCRIPT_TIMEOUT_MS,
   })
@@ -853,9 +876,10 @@ async function refresh($: EngineInterface, gen: number): Promise<string> {
   try {
     const [sent, entries] = await Promise.all([read($, items), read($, trash)])
     const removed = removedTitles(entries)
-    const reply = await $.model.fork({ prompt: refreshPrompt({ items: sent, removed }) })
+    const language = await itemLanguage($)
+    const reply = await $.model.fork({ prompt: refreshPrompt({ items: sent, removed, language }) })
     if (!reply.isAnswered && reply.reason === 'nothing-to-fork') {
-      return await refreshFromTranscript($, gen, sent, removed)
+      return await refreshFromTranscript($, gen, sent, removed, language)
     }
     await update($, review, () => [])
     return await settleRefresh($, gen, sent, reply)
