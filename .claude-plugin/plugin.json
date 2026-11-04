@@ -20,6 +20,13 @@
       "title": "Item language",
       "description": "The language item titles and details are written in, such as English or zh-TW. When empty, it falls back to Claude Code's language setting, then to the language the agent answers in. Takes effect on the next turn; items already on the list keep their language.",
       "default": ""
+    },
+    "band_max_items": {
+      "type": "string",
+      "title": "Items in the band",
+      "description": "The most items the band above the prompt shows at a time. The pane is not limited by it. Takes effect on the next draw.",
+      "options": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+      "default": "5"
     }
   }
 }

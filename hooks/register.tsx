@@ -3,16 +3,17 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { PendingTurn, ReviewTurn, TodoItem, TodoListState, TrashEntry, ViewKind } from '../types'
 import {
+  DEFAULT_BAND_ITEMS,
   MAX_TRASH,
   REVIEW_MIN_ITEMS,
   REVIEW_MIN_TURNS,
   REVIEW_SYSTEM,
   REVIEW_TURNS,
-  WINDOW_SIZE,
   type RemovedTitles,
   applyChanges,
   applyRefresh,
   applyReview,
+  bandItems,
   cellWidth,
   charWidth,
   cleanItems,
@@ -69,6 +70,7 @@ const PANE_TITLE = 'Todos'
 // The /config row of the plugin's `default_view` userConfig field.
 const DEFAULT_VIEW_KEY = 'todo-list.default_view'
 const LANGUAGE_KEY = 'todo-list.language'
+const BAND_ITEMS_KEY = 'todo-list.band_max_items'
 const NO_DETAIL = '(No detail. Run /todos refresh to add one.)'
 
 // The longest start of `text` that fits in `cells`, with an ellipsis.
@@ -248,10 +250,10 @@ const paneView = ($: EngineInterface): View => ({
 // the render's props. `titles` and `details` hold each item's title rows and
 // the rows its detail would take expanded (empty for the band, whose items are
 // one row each), `rows` the rows left for items, `cap` the most items a window
-// holds. Until a view draws, a window of the band's size and the `<n> more` row.
+// holds. Until a view draws, a window of the band's default size and the `<n> more` row.
 type Drawn = { titles: number[]; details: number[]; rows: number; cap: number }
-const undrawn = (cap: number): Drawn => ({ titles: [], details: [], rows: WINDOW_SIZE + 1, cap })
-const drawn: Record<ViewKind, Drawn> = { band: undrawn(WINDOW_SIZE), pane: undrawn(Infinity) }
+const undrawn = (cap: number): Drawn => ({ titles: [], details: [], rows: DEFAULT_BAND_ITEMS + 1, cap })
+const drawn: Record<ViewKind, Drawn> = { band: undrawn(DEFAULT_BAND_ITEMS), pane: undrawn(Infinity) }
 
 // The view's item heights with the detail expanded on the item titled
 // `expandedTitle` ('' for none). An item past the drawn list counts as one row.
@@ -731,17 +733,21 @@ async function ask(
   }
 }
 
+// What a /config row holds; undefined for a missing row or a read that fails.
+async function configValue($: EngineInterface, key: string) {
+  try {
+    return (await $.config.list()).find(one => one.key === key)?.value
+  } catch {
+    return undefined
+  }
+}
+
 // The language items are written in: the plugin's `language` setting, else
 // Claude Code's own, else undefined for the model to detect. A read that fails
 // counts as unset. Read on every request, so a change applies on the next turn.
 async function itemLanguage($: EngineInterface): Promise<string | undefined> {
   const usable = (value: unknown) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined)
-  let own: string | undefined
-  try {
-    own = usable((await $.config.list()).find(one => one.key === LANGUAGE_KEY)?.value)
-  } catch {
-    // Unset.
-  }
+  const own = usable(await configValue($, LANGUAGE_KEY))
   if (own !== undefined) {
     return own
   }
@@ -1061,12 +1067,7 @@ async function openPane($: EngineInterface, takesKeys = true): Promise<boolean> 
 
 // The `default_view` setting; band for a missing or unreadable row.
 async function defaultView($: EngineInterface): Promise<ViewKind> {
-  try {
-    const row = (await $.config.list()).find(one => one.key === DEFAULT_VIEW_KEY)
-    return row?.value === 'pane' ? 'pane' : 'band'
-  } catch {
-    return 'band'
-  }
+  return (await configValue($, DEFAULT_VIEW_KEY)) === 'pane' ? 'pane' : 'band'
 }
 
 // A view's window and its help line, drawn to fit. The help line wraps and names
@@ -1420,6 +1421,7 @@ export const register: Register = on => {
     if (isPaneMode || list.length === 0 || e.props.hasSurvey) {
       return next(e)
     }
+    const maxItems = bandItems(await configValue($, BAND_ITEMS_KEY))
 
     const ui = $.ui.resolve(e)
     const { Box, Button, Text } = ui
@@ -1439,8 +1441,8 @@ export const register: Register = on => {
         const rows = e.props.maxRows - others
         // A window that leaves items out keeps its size at the end of the list,
         // where it would have a spare row for one more.
-        const isWhole = list.length <= WINDOW_SIZE && list.length <= rows
-        const cap = isWhole ? WINDOW_SIZE : Math.max(1, Math.min(WINDOW_SIZE, rows - 1))
+        const isWhole = list.length <= maxItems && list.length <= rows
+        const cap = isWhole ? maxItems : Math.max(1, Math.min(maxItems, rows - 1))
         drawn.band = { titles: [], details: [], rows, cap }
         return rowWindow(
           list.map(() => 1),

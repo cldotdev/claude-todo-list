@@ -53,7 +53,7 @@ claude plugin install todo-list@claude-todo-list
 
 ### Band
 
-清單有事項且 pane 沒有開著時，prompt 上方的 band 會顯示加上編號的清單。band 以視窗顯示清單，編號仍是整份清單的編號，視窗下方會用暗色的 `<n> more` 標出後面還有幾個事項。視窗放得下多少事項，取決於 Claude Code 分給 band 的列數，最多 10 個，所以 prompt 輸入框裡的草稿變長時，視窗會縮小，不會讓 band 捲動。band 取得焦點時，說明列會變長，可能多佔一列，擠得很小的視窗因此可能少一個事項。離開 band 後，視窗會回到最前面。
+清單有事項且 pane 沒有開著時，prompt 上方的 band 會顯示加上編號的清單。band 以視窗顯示清單，編號仍是整份清單的編號，視窗下方會用暗色的 `<n> more` 標出後面還有幾個事項。視窗放得下多少事項，取決於 Claude Code 分給 band 的列數，最多為 `band_max_items` 設定的個數，所以 prompt 輸入框裡的草稿變長時，視窗會縮小，不會讓 band 捲動。band 取得焦點時，說明列會變長，可能多佔一列，擠得很小的視窗因此可能少一個事項。離開 band 後，視窗會回到最前面。`band_max_items` 設定在 `/config` 中顯示為 `todo-list.band_max_items`，可從 1 到 10 中選擇，預設 5。它在下一次繪製時生效，不限制 pane。如果手動寫進 `settings.json`，1 到 10 以外的值一律視為 5，但 `/config` 仍會顯示寫入的值。
 
 | 按鍵 | 動作 |
 | --- | --- |
@@ -71,7 +71,7 @@ claude plugin install todo-list@claude-todo-list
 
 ### Pane
 
-pane 把事項列在獨立的 pane 裡。全螢幕模式下，終端機寬度達 110 欄時，Claude Code 會把它固定在 transcript 旁邊，從上到下佔滿，所以長 prompt 不會把它擠小。每個標題都完整顯示，需要幾列就換成幾列，band 則會把沒有焦點的標題截成一列。它的視窗以列數計算，放得下多少事項就顯示多少，沒有 10 個的上限，視窗下方用暗色的 `<n> more` 標出後面還有幾個事項。清單是空的時，pane 會顯示 `No open items.`
+pane 把事項列在獨立的 pane 裡。全螢幕模式下，終端機寬度達 110 欄時，Claude Code 會把它固定在 transcript 旁邊，從上到下佔滿，所以長 prompt 不會把它擠小。每個標題都完整顯示，需要幾列就換成幾列，band 則會把沒有焦點的標題截成一列。它的視窗以列數計算，放得下多少事項就顯示多少，沒有數量上限，視窗下方用暗色的 `<n> more` 標出後面還有幾個事項。清單是空的時，pane 會顯示 `No open items.`
 
 - **開啟**：在 band 上按 `t`，或執行 `/todos pane`。除此之外，pane 只在預設檢視是 `pane` 時，於 session 開始或恢復 session 時自己開啟，band 被擠小時不會。pane 開著時不會畫出 band，清單只在一處顯示。prompt 輸入框是空的、沒有其他東西占用按鍵時執行 `/todos pane`，pane 會取得按鍵，pane 已經開著時也一樣。按 `t` 時，pane 要求按鍵的當下按鍵仍在 band 手上，所以要再按一次 `Ctrl+X Tab` 才會移到 pane
 - **預設檢視**：`default_view` 設定可選 `band` (預設) 或 `pane`，在 `/config` 裡顯示為 `todo-list.default_view`，並存在你的設定中。它在 session 開始或恢復 session 時生效，清單是空的也一樣，而且這時開啟的 pane 不會取得按鍵，打字仍會進到 prompt 輸入框；在 `/config` 裡的變更要到下一次 session 開始才生效，`t` 則會立刻切換。mod 的 hot reload 和 `/clear` 不會再套用一次。pane 只有在 Claude Code 排得下時才會開啟：沒有被要求開啟的 pane 需要 144 欄寬的終端機 (手動開過之後降為 110 欄)，比這窄時就維持 band

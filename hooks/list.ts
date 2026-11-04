@@ -339,8 +339,15 @@ export function applyRefresh(text: string, items: readonly TodoItem[]): TodoItem
   return cleanItems([...kept, ...add])
 }
 
-// The most items the band shows at a time.
-export const WINDOW_SIZE = 10
+export const DEFAULT_BAND_ITEMS = 5
+export const MAX_BAND_ITEMS = 10
+
+// The most items the band shows at a time, from the string the `band_max_items`
+// row holds.
+export function bandItems(value: unknown): number {
+  const items = Number(value)
+  return isNumberIn(items, MAX_BAND_ITEMS) ? items : DEFAULT_BAND_ITEMS
+}
 
 // Characters the terminal draws two cells wide: CJK, Hangul, and full-width forms.
 const WIDE_CLASS = '[\\u1100-\\u115F\\u2E80-\\uA4CF\\uAC00-\\uD7A3\\uF900-\\uFAFF\\uFE30-\\uFE4F\\uFF00-\\uFF60\\uFFE0-\\uFFE6]'

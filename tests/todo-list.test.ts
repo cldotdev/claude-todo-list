@@ -4,6 +4,8 @@ import type { On } from 'claude-code'
 
 import type { TrashEntry } from '../types'
 import {
+  DEFAULT_BAND_ITEMS,
+  MAX_BAND_ITEMS,
   MAX_DETAIL_LENGTH,
   MAX_TRASH,
   REVIEW_MIN_ITEMS,
@@ -721,7 +723,22 @@ async function windowOf(band: Drawn) {
 
 const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i)
 
+const bandItemsRow = (value: string) => ({
+  key: 'todo-list.band_max_items',
+  label: 'Items in the band',
+  kind: 'choice',
+  value,
+  options: range(1, MAX_BAND_ITEMS).map(String),
+  provider: { kind: 'plugin', name: 'todo-list' },
+  isLocked: false,
+})
+
+// Answers the band's settings read with a `band_max_items` row holding `count`.
+const showItems = (on: On, count: number) =>
+  on('config.list', () => ({ value: [bandItemsRow(String(count))] }) as never)
+
 test('the band shows a 10-item window with the count of the items after it', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   const { band } = await bandWith($, on, listOf(25))
   expect(await windowOf(band)).toEqual({ numbers: range(1, 10), more: '15 more' })
   await focusRow($, 24)
@@ -730,12 +747,14 @@ test('the band shows a 10-item window with the count of the items after it', asy
 })
 
 test('a short list shows whole with no more line', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   const { band } = await bandWith($, on, listOf(7))
   expect(await windowOf(band)).toEqual({ numbers: range(1, 7), more: undefined })
   await band.unmount()
 })
 
 test('focus moves scroll the window by the least distance', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   const { band } = await bandWith($, on, listOf(25))
   await focusRow($, 9)
   await focusRow($, 10)
@@ -770,6 +789,7 @@ test('paging stays full, moves by up to 10 items, and keeps the focus row', () =
 })
 
 test('the paging keys change nothing at an edge of the list', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   const { band } = await bandWith($, on, listOf(25))
   await focusRow($, 4)
   await band.press({ key: 'previous-page' })
@@ -779,6 +799,7 @@ test('the paging keys change nothing at an edge of the list', async ($, on) => {
 })
 
 test('the paging keys change nothing on a list of 10 items or fewer', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   const { band } = await bandWith($, on, listOf(10))
   await focusRow($, 3)
   await band.press({ key: 'next-page' })
@@ -789,6 +810,7 @@ test('the paging keys change nothing on a list of 10 items or fewer', async ($, 
 })
 
 test('the paging keys change nothing in the details view', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   const { band } = await bandWith($, on, listOf(25))
   await focusRow($, 4)
   await band.press({ key: 'details' })
@@ -830,6 +852,7 @@ test('the help line leaves the paging keys out in the details view', async ($, o
 })
 
 test('the help line leaves the paging keys out at 10 items', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   const { band } = await bandWith($, on, listOf(10))
   await focusRow($, 0)
   expect(await helpOf(band)).toContain('v paste')
@@ -838,6 +861,7 @@ test('the help line leaves the paging keys out at 10 items', async ($, on) => {
 })
 
 test('leaving the band puts the window back at the top', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   const { band } = await bandWith($, on, listOf(25))
   await focusRow($, 14)
   expect((await windowOf(band)).numbers).toEqual(range(6, 15))
@@ -847,6 +871,7 @@ test('leaving the band puts the window back at the top', async ($, on) => {
 })
 
 test('a delete in the last window pulls the window up so it stays full', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   const { clock, band } = await bandWith($, on, listOf(25))
   await focusRow($, 24)
   await focusRow($, 19)
@@ -855,6 +880,119 @@ test('a delete in the last window pulls the window up so it stays full', async (
   await clock.advance(0)
   expect(await windowOf(band)).toEqual({ numbers: range(15, 24), more: undefined })
   await band.unmount()
+})
+
+// A setting row whose value a test can change between draws; a loop cannot call `on` again.
+function changingItems(on: On) {
+  const stored = { value: '' }
+  on('config.list', () => ({ value: [bandItemsRow(stored.value)] }) as never)
+  return stored
+}
+
+async function bandOf25($: Engine, on: On) {
+  await listWith($, on, listOf(25))
+  return bandAt($, 20)
+}
+
+test('the band shows the default number of items when the setting is not set', async ($, on) => {
+  on('config.list', () => ({ value: [] }) as never)
+  const band = await bandOf25($, on)
+  expect(await windowOf(band)).toEqual({ numbers: range(1, DEFAULT_BAND_ITEMS), more: '20 more' })
+  await band.unmount()
+})
+
+test('a valid setting sets the window', async ($, on) => {
+  showItems(on, 4)
+  const band = await bandOf25($, on)
+  expect(await windowOf(band)).toEqual({ numbers: range(1, 4), more: '21 more' })
+  await band.unmount()
+})
+
+test('both ends of the range are valid', async ($, on) => {
+  const stored = changingItems(on)
+  await listWith($, on, listOf(25))
+  for (const value of [1, MAX_BAND_ITEMS]) {
+    stored.value = String(value)
+    const band = await bandAt($, 20)
+    expect(await windowOf(band)).toEqual({ numbers: range(1, value), more: `${25 - value} more` })
+    await band.unmount()
+  }
+})
+
+test('an invalid setting gives the default', async ($, on) => {
+  const stored = changingItems(on)
+  await listWith($, on, listOf(25))
+  for (const value of ['0', '-1', String(MAX_BAND_ITEMS + 1), '3.5', 'aaa', '']) {
+    stored.value = value
+    const band = await bandAt($, 20)
+    expect(await windowOf(band), value).toEqual({ numbers: range(1, DEFAULT_BAND_ITEMS), more: '20 more' })
+    await band.unmount()
+  }
+})
+
+test('a setting that cannot be read gives the default', async ($, on) => {
+  on('config.list', () => {
+    throw new Error('unreadable')
+  })
+  const band = await bandOf25($, on)
+  expect(await windowOf(band)).toEqual({ numbers: range(1, DEFAULT_BAND_ITEMS), more: '20 more' })
+  await band.unmount()
+})
+
+for (const value of [99, 'aaa']) {
+  test(`a stored ${value} does not stop the mod from loading`, { options: { band_max_items: value } as never }, async ($, on) => {
+    showItems(on, DEFAULT_BAND_ITEMS)
+    const band = await bandOf25($, on)
+    expect(await windowOf(band)).toEqual({ numbers: range(1, DEFAULT_BAND_ITEMS), more: '20 more' })
+    await band.unmount()
+  })
+}
+
+test('a list shows whole up to the setting and is windowed one item past it', async ($, on) => {
+  const stored = changingItems(on)
+  await listWith($, on, listOf(5))
+  stored.value = '5'
+  const whole = await bandAt($, 20)
+  expect(await windowOf(whole)).toEqual({ numbers: range(1, 5), more: undefined })
+  await whole.unmount()
+  stored.value = '4'
+  const windowed = await bandAt($, 20)
+  expect(await windowOf(windowed)).toEqual({ numbers: range(1, 4), more: '1 more' })
+  await windowed.unmount()
+})
+
+test('the window holds what the rows or the setting allow, whichever is less', async ($, on) => {
+  const stored = changingItems(on)
+  await listWith($, on, listOf(25))
+  stored.value = '8'
+  const byRows = await bandAt($, 8)
+  expect(await windowOf(byRows)).toEqual({ numbers: range(1, 4), more: '21 more' })
+  await byRows.unmount()
+  stored.value = '3'
+  const bySetting = await bandAt($, 8)
+  expect(await windowOf(bySetting)).toEqual({ numbers: range(1, 3), more: '22 more' })
+  await bySetting.unmount()
+})
+
+test('focus moves scroll a window of the set size', async ($, on) => {
+  showItems(on, 4)
+  const { band } = await bandWith($, on, listOf(25))
+  await focusRow($, 3)
+  await focusRow($, 4)
+  expect(await dotted(band)).toBe('t5')
+  expect((await windowOf(band)).numbers).toEqual(range(2, 5))
+  await band.unmount()
+})
+
+test('the setting limits the band and not the pane', async ($, on) => {
+  showItems(on, 2)
+  await listWith($, on, listOf(25))
+  const band = await bandAt($, 20)
+  expect(await windowOf(band)).toEqual({ numbers: range(1, 2), more: '23 more' })
+  await band.unmount()
+  const pane = await paneAt($, 40)
+  expect(await windowOf(pane)).toEqual({ numbers: range(1, 25), more: undefined })
+  await pane.unmount()
 })
 
 const NOOP = '{"remove":[],"add":[]}'
@@ -1649,6 +1787,7 @@ async function listWith($: Engine, on: On, json: string) {
 }
 
 test('the band fits its window to the rows it is given', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   await listWith($, on, listOf(25))
   for (const [rows, numbers, more] of [
     [20, range(1, 10), '15 more'],
@@ -1696,6 +1835,7 @@ test('a help line that wraps takes a row from the window once the band holds the
 })
 
 test('mounting the band again with fewer rows shrinks the window around the focus', async ($, on) => {
+  showItems(on, MAX_BAND_ITEMS)
   await listWith($, on, listOf(25))
   const tall = await bandAt($, 20)
   await focusRow($, 8)

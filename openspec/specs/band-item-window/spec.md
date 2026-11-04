@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Keeps the band above the prompt short on a long list by showing a window over it that fits the band's rows, up to 10 items, with keys to page the window and a count of the items below it.
+Keeps the band above the prompt short on a long list by showing a window over it that fits the band's rows, up to the `band_max_items` setting, with keys to page the window and a count of the items below it.
 
 ## Requirements
 
 ### Requirement: The Band Shows a Window That Fits Its Rows
 
-The band SHALL show its items as a window over the list. The window SHALL hold as many items as fit in the rows the engine gives the band, together with the band's other rows: the rule, the heading, the help line as wrapped, the `<n> more` line when items come after the window, and the extra rows of the focused item's wrapped title. The window SHALL hold at most 10 items, and at least 1 item while the list has any. When the whole list fits, the window SHALL hold the whole list. In list view the band SHALL NOT be taller than the rows the engine gives it, unless those rows cannot hold one item. Each item SHALL keep its list-wide number, the number `/todos delete`, `/todos restore`, and pasted quotes use. While the band does not hold the focus, the window SHALL start at the first item.
+The band SHALL show its items as a window over the list. The window SHALL hold as many items as fit in the rows the engine gives the band, together with the band's other rows: the rule, the heading, the help line as wrapped, the `<n> more` line when items come after the window, and the extra rows of the focused item's wrapped title. The window SHALL hold at most `band_max_items` items, and at least 1 item while the list has any. When the whole list fits within those limits, the window SHALL hold the whole list. In list view the band SHALL NOT be taller than the rows the engine gives it, unless those rows cannot hold one item. Each item SHALL keep its list-wide number, the number `/todos delete`, `/todos restore`, and pasted quotes use. While the band does not hold the focus, the window SHALL start at the first item.
 
 #### Scenario: A Long List Shows Its First 10 Items
 
@@ -22,7 +22,7 @@ The band SHALL show its items as a window over the list. The window SHALL hold a
 
 #### Scenario: A Short List Shows Whole
 
-- **WHEN** the list holds 7 items and the band has 20 rows
+- **WHEN** the list holds 7 items, `band_max_items` is 10, and the band has 20 rows
 - **THEN** the band shows all 7 items
 
 #### Scenario: A Squeezed Band Shows Fewer Items
@@ -44,6 +44,80 @@ The band SHALL show its items as a window over the list. The window SHALL hold a
 
 - **WHEN** the list holds 25 items and the band has 3 rows
 - **THEN** the band shows 1 item, and the engine scrolls the band
+
+### Requirement: A Setting Limits the Items in the Band
+
+The plugin SHALL declare a `band_max_items` user setting, a string with the options `"1"` through `"10"` and the default `"5"`, which `/config` shows as a choice named `todo-list.band_max_items`. A stored value other than 1 through 10, a missing row, or a list of rows that cannot be read SHALL count as the default, and SHALL NOT stop the mod from loading. The settings list reports a stored value as a string whatever its type, so a number from 1 through 10 edited into the settings file by hand SHALL take effect, even though the engine's notice says it reads as the default. The band SHALL read the setting each time it draws. The setting SHALL NOT affect the pane. Scenarios of this capability that name a window of 10 items have `band_max_items` set to 10.
+
+#### Scenario: The Default Shows 5 Items
+
+- **WHEN** the list holds 25 items, `band_max_items` is not set, the band has 20 rows, and the band does not hold the focus
+- **THEN** the band shows items 1 through 5 and `20 more`
+
+#### Scenario: A Valid Value Sets the Window
+
+- **WHEN** the list holds 25 items, `band_max_items` is 4, the band has 20 rows, and the band does not hold the focus
+- **THEN** the band shows items 1 through 4 and `21 more`
+
+#### Scenario: Both Ends of the Range Are Valid
+
+- **WHEN** the list holds 25 items, the band has 20 rows, and `band_max_items` is 1 or 10
+- **THEN** the band shows 1 item with `24 more`, or 10 items with `15 more`
+
+#### Scenario: A Stored Value Outside the Options Does Not Stop the Mod
+
+- **WHEN** the settings file holds `band_max_items` as 99 or `"aaa"`
+- **THEN** the mod loads and the band shows the default number of items
+
+#### Scenario: A Row Holding Any Other Value Gives the Default
+
+- **WHEN** the list holds 25 items, the band has 20 rows, and the settings list reports `band_max_items` as `"0"`, `"11"`, `"3.5"`, `"aaa"`, or an empty string
+- **THEN** the band shows items 1 through 5 and `20 more`
+
+#### Scenario: A Number in the Range Edited by Hand Takes Effect
+
+- **WHEN** the list holds 25 items, the band has 20 rows, and the settings file holds `band_max_items` as the number 3
+- **THEN** the band shows items 1 through 3 and `22 more`
+
+#### Scenario: An Unreadable Setting Gives the Default
+
+- **WHEN** the list holds 25 items, the band has 20 rows, and the list of settings cannot be read
+- **THEN** the band shows items 1 through 5 and `20 more`
+
+#### Scenario: A List Up to the Setting Shows Whole
+
+- **WHEN** the list holds 5 items, `band_max_items` is 5, and the band has 20 rows
+- **THEN** the band shows all 5 items and no `more` line
+
+#### Scenario: A List One Item Past the Setting Is Windowed
+
+- **WHEN** the list holds 5 items, `band_max_items` is 4, and the band has 20 rows
+- **THEN** the band shows items 1 through 4 and `1 more`
+
+#### Scenario: Focus Moves Scroll a Window of the Set Size
+
+- **WHEN** the list holds 25 items, `band_max_items` is 4, the band has 20 rows, the window shows items 1 through 4, the focus is on item 4, and the focus moves to item 5
+- **THEN** the window shows items 2 through 5
+
+#### Scenario: Paging Moves by the Setting
+
+- **WHEN** the list holds 25 items, `band_max_items` is 4, the band has 20 rows, the window shows items 1 through 4, the focus is on item 2, and the user presses `n`
+- **THEN** the window shows items 5 through 8 and the focus is on item 6
+
+#### Scenario: A Squeezed Band Shows Fewer Than the Setting
+
+- **WHEN** the list holds 25 items, `band_max_items` is 8, the band has 8 rows, every title and the help line fit on one row, and the band does not hold the focus
+- **THEN** the band shows items 1 through 4 and `21 more`
+
+#### Scenario: The Setting Limits a Band with Rows to Spare
+
+- **WHEN** the list holds 25 items, `band_max_items` is 3, the band has 8 rows, every title and the help line fit on one row, and the band does not hold the focus
+- **THEN** the band shows items 1 through 3 and `22 more`
+
+#### Scenario: The Pane Ignores the Setting
+
+- **WHEN** the list holds 25 items, `band_max_items` is 2, the pane has 40 body rows, and every title and the help line fit on one row
+- **THEN** the pane shows all 25 items
 
 ### Requirement: The Band Counts the Items After the Window
 
