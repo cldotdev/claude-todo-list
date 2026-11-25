@@ -28,6 +28,8 @@ const BAND = {
   component: 'AbovePrompt',
   props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 80 } as never,
 } as const
+// What the tests' engine draws in the band's place.
+const ENGINE_BAND = 'engine band'
 
 type Reply = ({ isAnswered: true; text: string } | { isAnswered: false; reason: string }) & {
   // Runs while the request waits for its reply.
@@ -98,13 +100,18 @@ function setup(
     return { value: undefined }
   })
   on('prompt.edit', (_$, e) => e as never)
-  on('ui.render', $ => h($.ui.resolve(BAND).Text, null, 'engine band') as never)
+  on('ui.render', $ => h($.ui.resolve(BAND).Text, null, ENGINE_BAND) as never)
   on('session.id', () => ({ value: session.id }))
   on('settings.read', () => ({ value: settings }))
-  on('ui.focus', (_$, e) => {
+  // A hook that names no plugin hears every focus move on older builds and
+  // only its own plugin's on newer ones, which take `{ plugin: '*' }` for all.
+  // Older builds match that literally, so the answer is registered both ways.
+  const landOn = (_$: unknown, e: { element?: string }) => {
     landed.push(e.element)
     return {}
-  })
+  }
+  on('ui.focus', landOn)
+  on('ui.focus', { plugin: '*' }, landOn)
   on('prompt.fill', (_$, e) => {
     filled.push(e.text)
     return { isFilled: true, text: e.text, cursor: e.text.length }
@@ -144,7 +151,7 @@ async function drawnOf(ui: Mounted<'terminal', 'AbovePrompt'>) {
 
 const expectBandHidden = async ($: Engine) =>
   expect(await drawnOf(await $.ui.mount({ ...BAND, props: bandProps(20), requestId: 'band' }))).toEqual({
-    texts: ['engine band'],
+    texts: [ENGINE_BAND],
     buttons: 0,
   })
 
@@ -171,7 +178,7 @@ test('subagent and aborted turns are skipped', async ($, on) => {
   await turn($, clock, { reason: 'aborted', isAborted: true })
   await turn($, clock, { reason: 'error' })
   expect(asked).toHaveLength(0)
-  expect((await shown($)).texts).toEqual(['engine band'])
+  expect((await shown($)).texts).toEqual([ENGINE_BAND])
 })
 
 test('a failed or unparseable completion keeps the previous list', async ($, on) => {
@@ -545,7 +552,7 @@ test('deleting the only item removes the band', async ($, on) => {
   await band.press({ key: 'delete' })
   await clock.advance(0)
   await band.unmount()
-  expect((await shown($)).texts).toEqual(['engine band'])
+  expect((await shown($)).texts).toEqual([ENGINE_BAND])
 })
 
 test('deleting in the details view shows the next item detail', async ($, on) => {
@@ -571,7 +578,7 @@ test('the delete key does nothing while no item is focused', async ($, on) => {
 
 test('the help line shows only the focus key until the band holds the focus', async ($, on) => {
   const { band } = await bandWith($, on, THREE)
-  const help = async () => (await band.findAll({ type: 'Text' })).map(one => one.text).at(-1)?.trim()
+  const help = () => helpOf(band)
   expect(await help()).toBe('Ctrl+X Tab to focus')
   await focusRow($, 0)
   expect(await help()).not.toContain('Ctrl+X Tab')
@@ -603,8 +610,13 @@ const FIVE = JSON.stringify({
 const marks = async (band: Drawn) =>
   (await band.findAll({ type: 'Text', text: /^\d+\. *$/ })).filter(one => one.props.color !== undefined).length
 
+// The view's last line. Newer builds draw the engine's own row after the band's.
 const helpOf = async (band: Drawn) =>
-  (await band.findAll({ type: 'Text' })).map(one => one.text).at(-1)?.trim()
+  (await band.findAll({ type: 'Text' }))
+    .map(one => one.text)
+    .filter(one => one !== ENGINE_BAND)
+    .at(-1)
+    ?.trim()
 
 test('the select key toggles the focused item and marks it', async ($, on) => {
   const { band } = await bandWith($, on, THREE)
@@ -2561,7 +2573,7 @@ test('a band render after an in-process resume loads the resumed list', async ($
   const { clock, session } = setupStored(on, [], { [keyOf('s2', second)]: second }, ALL_AGES)
   await start($)
   await resumeTo($, session)
-  expect((await shown($)).texts).toEqual(['engine band'])
+  expect((await shown($)).texts).toEqual([ENGINE_BAND])
   await clock.advance(0)
   expect((await shown($)).texts.map(one => one.trim())).toContain('two')
 })
