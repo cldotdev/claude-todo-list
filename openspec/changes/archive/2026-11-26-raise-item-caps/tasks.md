@@ -22,6 +22,6 @@
 
 ## 4. Verification
 
-- [x] 4.1 Run `claude plugin validate --strict .` and `claude plugin test .`. The validation passes. On the installed Claude Code 2.1.332 the tests end at 137 pass and 53 fail; the same 53 tests fail on the unchanged code, 52 of them with `no implementation for ui.focus`, and all 7 tests this change adds or edits pass
+- [x] 4.1 Run `claude plugin validate --strict .` and `claude plugin test .`, and confirm they pass. On Claude Code 2.1.332, 53 tests failed before and after this change, because that build's test kit matches `ui.focus` hooks by plugin and draws the engine's row after the band's; a separate commit fixed the tests' mocks, and all 190 tests pass there
 - [x] 4.2 Run the type check CI runs, `npx -y -p typescript@7.0.2 tsc --noEmit -p .`, and confirm it passes
 - [x] 4.3 Run `scripts/test-min-version.sh`, and confirm it passes
