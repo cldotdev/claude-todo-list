@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { PendingTurn, ReviewTurn, TodoItem, TodoListState, TrashEntry, ViewKind } from '../types'
 import {
   DEFAULT_BAND_ITEMS,
+  MAX_ITEMS,
   MAX_TRASH,
   REVIEW_MIN_ITEMS,
   REVIEW_MIN_TURNS,
@@ -44,7 +45,9 @@ const MODEL = 'sonnet'
 const DAY_MS = 24 * 60 * 60 * 1000
 // Claude Code's own default for cleanupPeriodDays.
 const DEFAULT_CLEANUP_DAYS = 30
-const COMPLETE_TIMEOUT_MS = 60_000
+const COMPLETE_TIMEOUT_MS = 120_000
+// Large enough for a reply that lists several hundred three-digit numbers.
+const REPLY_TOKENS = 8192
 // The transcript fallback sends up to TRANSCRIPT_TEXT characters to the main model.
 const TRANSCRIPT_TIMEOUT_MS = 180_000
 // Rows take no hotkey: a digit hotkey also fires from an empty prompt, so a
@@ -172,9 +175,9 @@ const migrate = (stored: (string | TodoItem)[]): TodoItem[] =>
 const loadTrash = (stored: Stored): TrashEntry[] =>
   stored.trash ?? (stored.done ?? []).map(title => ({ title, detail: '', by: 'user', at: stored.updatedAt }))
 
-// Each source keeps its own newest MAX_TRASH entries.
+// Each source keeps its own newest MAX_TRASH[source] entries.
 function capTrash(entries: readonly TrashEntry[]): TrashEntry[] {
-  const newest = (by: TrashEntry['by']) => entries.filter(one => one.by === by).slice(-MAX_TRASH)
+  const newest = (by: TrashEntry['by']) => entries.filter(one => one.by === by).slice(-MAX_TRASH[by])
   const kept = new Set([...newest('user'), ...newest('model')])
   return entries.filter(one => kept.has(one))
 }
@@ -761,7 +764,7 @@ async function itemLanguage($: EngineInterface): Promise<string | undefined> {
 const incremental = async ($: EngineInterface, turn: PendingTurn, gen: number) =>
   ask($, gen, {
     system: systemPrompt(await itemLanguage($)),
-    maxTokens: 8192,
+    maxTokens: REPLY_TOKENS,
     prompt: (sent, removed) => incrementalPrompt({ ...turn, items: sent, removed }),
     apply: applyChanges,
   })
@@ -769,7 +772,7 @@ const incremental = async ($: EngineInterface, turn: PendingTurn, gen: number) =
 const reviewList = ($: EngineInterface, turns: readonly ReviewTurn[], gen: number) =>
   ask($, gen, {
     system: REVIEW_SYSTEM,
-    maxTokens: 2048,
+    maxTokens: REPLY_TOKENS,
     prompt: (sent, removed) => reviewPrompt({ items: sent, removed, turns }),
     apply: applyReview,
   })
@@ -872,7 +875,7 @@ async function refreshFromTranscript(
     model,
     effort: 'medium',
     prompt: refreshPrompt({ items: sent, removed, transcript, language }),
-    maxTokens: 8192,
+    maxTokens: REPLY_TOKENS,
     timeoutMs: TRANSCRIPT_TIMEOUT_MS,
   })
   return settleRefresh($, gen, sent, reply, ' It was rebuilt from the transcript without the prompt cache.')
@@ -1332,6 +1335,12 @@ export const register: Register = on => {
       const listed = new Set(current.map(one => one.title))
       const gone = new Set(picked.map(one => one.entry.title))
       const fresh = picked.filter(one => !listed.has(one.entry.title))
+      const room = MAX_ITEMS - current.length
+      if (fresh.length > room) {
+        return {
+          text: `The list has room for ${itemCount(room)}, but the restore needs ${fresh.length}. Nothing was restored.`,
+        }
+      }
       await update($, trash, entries => entries.filter(one => !gone.has(one.title)))
       await commit($, cleanItems([...current, ...picked.map(one => one.entry)]))
       const lines = picked.map(

@@ -7,6 +7,7 @@ import {
   DEFAULT_BAND_ITEMS,
   MAX_BAND_ITEMS,
   MAX_DETAIL_LENGTH,
+  MAX_ITEMS,
   MAX_TRASH,
   REVIEW_MIN_ITEMS,
   REVIEW_SYSTEM,
@@ -50,6 +51,7 @@ function setup(
   const asked: string[] = []
   const systems: (string | undefined)[] = []
   const models: string[] = []
+  const maxTokens: (number | undefined)[] = []
   const filled: string[] = []
   const submitted: string[] = []
   const landed: (string | undefined)[] = []
@@ -112,9 +114,10 @@ function setup(
     asked.push(e.prompt)
     systems.push(e.system)
     models.push(e.model)
+    maxTokens.push(e.maxTokens)
     return nextReply(replies)
   })
-  return { asked, systems, models, clock, filled, landed, ran, submitted, toasts, logs, opened, closed, placement, session }
+  return { asked, systems, models, maxTokens, clock, filled, landed, ran, submitted, toasts, logs, opened, closed, placement, session }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -1167,7 +1170,7 @@ test('a title the model removed can come back, and a later delete leaves one use
 const entry = (title: string, by: TrashEntry['by']) => ({ title, detail: `d-${title}`, by, at: 1 })
 
 test('each source keeps its own newest entries in the trash', async ($, on) => {
-  const old = Array.from({ length: MAX_TRASH }, (_, i) => entry(`m${i}`, 'model'))
+  const old = Array.from({ length: MAX_TRASH.model }, (_, i) => entry(`m${i}`, 'model'))
   const users = ['u0', 'u1', 'u2'].map(title => entry(title, 'user'))
   const { clock } = setup(on, [removing(1)], {
     'session:s1': { items: [{ title: 'x', detail: '' }], trash: [...users, ...old], updatedAt: Date.now() },
@@ -1176,10 +1179,85 @@ test('each source keeps its own newest entries in the trash', async ($, on) => {
   await turn($, clock, {})
   // Title lines only: every entry here but x carries a detail line.
   const lines = ((await run($, 'trash')) ?? '').split('\n').filter(line => / \[(user|model)\]$/.test(line))
-  expect(lines).toHaveLength(MAX_TRASH + users.length)
+  expect(lines).toHaveLength(MAX_TRASH.model + users.length)
   expect(lines[0]).toContain('x [model]')
   expect(lines).not.toContain(expect.stringContaining('m0 '))
   expect(lines.filter(one => one.endsWith('[user]'))).toHaveLength(users.length)
+})
+
+const storedItems = (count: number, prefix: string) =>
+  Array.from({ length: count }, (_, i) => ({ title: `${prefix}${i}`, detail: '' }))
+
+const trashTitles = async ($: Engine) =>
+  ((await run($, 'trash')) ?? '').split('\n').filter(line => / \[(user|model)\]$/.test(line))
+
+test('a list holding more than the model trash cap still takes an added item', async ($, on) => {
+  const held = MAX_TRASH.model + 1
+  const { clock } = setup(on, [adding('new')], {
+    'session:s1': { items: storedItems(held, 'i'), trash: [], updatedAt: Date.now() },
+  })
+  await start($)
+  await turn($, clock, {})
+  expect(((await run($, '')) ?? '').split('\n').at(-2)).toBe(`${held + 1}. new`)
+})
+
+test('a full list drops an added item without trashing it', async ($, on) => {
+  const { clock } = setup(on, [adding('extra')], {
+    'session:s1': { items: storedItems(MAX_ITEMS, 'i'), trash: [], updatedAt: Date.now() },
+  })
+  await start($)
+  await turn($, clock, {})
+  const text = (await run($, '')) ?? ''
+  expect(text.split('\n')).toHaveLength(MAX_ITEMS + 1)
+  expect(text).not.toContain('extra')
+  expect(await run($, 'trash')).toBe('The trash is empty.')
+})
+
+test('user deletions stay in the trash past the model cap and restore whole', async ($, on) => {
+  const count = MAX_TRASH.model + 5
+  setup(on, [], { 'session:s1': { items: storedItems(count, 'u'), trash: [], updatedAt: Date.now() } })
+  await start($)
+  const before = await run($, '')
+  await run($, 'clear')
+  expect(await trashTitles($)).toHaveLength(count)
+  expect(await run($, `restore 1-${count}`)).toStartWith(`Restored ${count} items:`)
+  expect((await run($, '') ?? '').split('\n')).toHaveLength(before?.split('\n').length ?? 0)
+})
+
+test('a restore the list has no room for is cancelled and changes nothing', async ($, on) => {
+  const { submitted, clock } = setup(on, [], {
+    'session:s1': {
+      items: storedItems(MAX_ITEMS - 1, 'i'),
+      trash: [entry('a', 'user'), entry('b', 'model')],
+      updatedAt: Date.now(),
+    },
+  })
+  await start($)
+  const listBefore = await run($, '')
+  const trashBefore = await run($, 'trash')
+  expect(await run($, 'restore 1-2')).toBe('The list has room for 1 item, but the restore needs 2. Nothing was restored.')
+  await clock.advance(0)
+  expect(submitted).toEqual([])
+  expect(await run($, '')).toBe(listBefore)
+  expect(await run($, 'trash')).toBe(trashBefore)
+  expect(await run($, 'restore 1')).toBe('Restored 1 item:\n1. b')
+})
+
+test('a restore of an entry already on a full list needs no room', async ($, on) => {
+  setup(on, [], {
+    'session:s1': { items: storedItems(MAX_ITEMS, 'i'), trash: [entry('i0', 'user')], updatedAt: Date.now() },
+  })
+  await start($)
+  expect(await run($, 'restore 1')).toBe('Restored 0 items:\n1. i0 (already on the list)')
+  expect(await run($, 'trash')).toBe('The trash is empty.')
+})
+
+test('a review asks for as many reply tokens as an update', async ($, on) => {
+  const { clock, maxTokens } = setup(on, [adding('a'), ...noops(REVIEW_TURNS - 1), removing(1)])
+  await start($)
+  await turns($, clock, REVIEW_TURNS)
+  expect(maxTokens).toHaveLength(REVIEW_TURNS + 1)
+  expect(maxTokens.at(-1)).toBe(maxTokens[0])
 })
 
 test('a saved trash comes back on resume', async ($, on) => {

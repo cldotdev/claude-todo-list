@@ -2,8 +2,9 @@ import type { SessionMessage } from 'claude-code'
 
 import type { ReviewTurn, TodoItem, TrashEntry } from '../types'
 
-const MAX_ITEMS = 99
-export const MAX_TRASH = MAX_ITEMS
+export const MAX_ITEMS = 999
+// The user's cap follows the list's, so one `/todos clear` is always fully restorable.
+export const MAX_TRASH = { user: MAX_ITEMS, model: 99 } as const
 const MAX_ITEM_LENGTH = 80
 export const MAX_DETAIL_LENGTH = 1000
 // A guard against pasted logs, far above any normal turn.

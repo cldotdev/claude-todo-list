@@ -29,7 +29,7 @@ claude plugin install todo-list@claude-todo-list
 | `/todos delete <numbers>` | Deletes items by number, such as `2`, `1-3`, or `1,4 6`. A number past the end cancels the whole delete. |
 | `/todos clear` | Deletes every item. The items go to the trash as your deletions. |
 | `/todos trash` | Lists removed items, newest first, with their details and who removed each. |
-| `/todos restore <numbers>` | Puts trash items back on the list, numbered as `/todos trash` shows them. A number past the end cancels the whole restore. |
+| `/todos restore <numbers>` | Puts trash items back on the list, numbered as `/todos trash` shows them. A number past the end, or a restore the list has no room for, cancels the whole restore. |
 | `/todos purge <numbers>` | Removes trash entries for good, numbered the same way. Purging an item you deleted lets the model add it back. |
 | `/todos reset` | Empties the list and the trash, which lifts every never-add-back block. |
 | `/todos <prompt>` | Sends the prompt with every item quoted and numbered above it, so it can say "do 1 and 2, skip 3". |
@@ -80,9 +80,9 @@ The mod also reads Claude Code's `cleanupPeriodDays` setting (30 by default): a 
 ## How It Works
 
 - **Updates**: after each main-loop turn that ends with an answer, the mod asks Sonnet (the `sonnet` alias, which follows the installed Claude Code version) which items the turn resolved and opened. Subagent turns do not count.
-- **Open items**: work someone deferred, a follow-up or check the agent promised, or an unsettled question or decision. The step in progress, anything finished within the same turn, and tasks in an OpenSpec `tasks.md` stay off the list. Each item has a one-line title and a short detail.
+- **Open items**: work someone deferred, a follow-up or check the agent promised, or an unsettled question or decision. The step in progress, anything finished within the same turn, and tasks in an OpenSpec `tasks.md` stay off the list. Each item has a one-line title and a short detail. The list holds at most 999 items. Each update sends the whole list to the model, so on a model with a smaller context window a very long list can stop updating before it reaches that cap.
 - **Reviews**: a review removes items that are no longer open, including ones a later turn made moot without naming them. It runs over the recent turns after 8 answered turns, or after 3 when the list holds 6 or more items, and never adds items.
-- **Trash**: items that leave the list go to a trash with their title, detail, remover (you or the model), and time, keeping each remover's newest 99. Items you removed are never added back; items the model removed come back only if the conversation reopens them.
+- **Trash**: items that leave the list go to a trash with their title, detail, remover (you or the model), and time, keeping the newest 999 you removed and the newest 99 the model removed. Items you removed are never added back; items the model removed come back only if the conversation reopens them.
 - **Storage**: lists are kept per session and come back on resume. When all saved lists pass 80% of the mod's 4 MiB store, the ones unchanged the longest are dropped until they are back at 80%, never the current session's. A toast reports a failed save once per session. `/clear` empties the list and the trash.
 - **Cost**: each answered turn costs one extra Sonnet call, and a review one more, at most every 3 turns. `/todos refresh` forks the main conversation, so it runs on the main model with the whole context. Right after a resume there is nothing to fork, so it rebuilds the list from the transcript on the main model without the prompt cache, which costs more. The transcript holds the newest 200,000 characters, with each tool result cut to 2,000.
 
