@@ -74,7 +74,7 @@ The per-turn update, the periodic review, and `/todos refresh` SHALL be told whi
 
 ### Requirement: Restoring from the Trash
 
-`/todos restore <numbers>` SHALL take numbers as `/todos trash` shows them, in the same forms `/todos delete` accepts (such as `2`, `1-3`, or `1,4 6`). Each restored entry SHALL leave the trash and its item SHALL be appended to the list with its title and detail; restoring a user entry lifts its never-add-back block. An entry whose title is already on the list SHALL leave the trash without adding a second item. The reply SHALL start with `Restored <count>:`, counting only the items added to the list, followed by one `<number>. <title>` line per picked entry, with ` (already on the list)` after a title that was already listed. A number past the end of the trash SHALL cancel the whole restore with `No trash entry <number>. Nothing was restored.`, and a missing or malformed number list SHALL get a usage message ending `Nothing was restored.`. When the picked entries whose titles are not on the list outnumber the items the list has room for under its cap, the whole restore SHALL be cancelled with `The list has room for <count>, but the restore needs <number>. Nothing was restored.`, where `<count>` is the room as `1 item` or `<n> items`. In each of these cases nothing SHALL change and nothing SHALL be sent as a prompt.
+`/todos restore <numbers>` SHALL take numbers as `/todos trash` shows them, in the same forms `/todos delete` accepts (such as `2`, `1-3`, or `1,4 6`). Each restored entry SHALL leave the trash and its item SHALL be appended to the list with its title and detail; restoring a user entry lifts its never-add-back block. An entry whose title is already on the list SHALL leave the trash without adding a second item. The reply SHALL start with `Restored <count>:`, counting only the items added to the list, followed by one `<number>. <title>` line per picked entry, with a space and `(already on the list)` after a title that was already listed. A number past the end of the trash SHALL cancel the whole restore with `No trash entry <number>. Nothing was restored.`, and a missing or malformed number list SHALL get a usage message ending `Nothing was restored.`. When the picked entries whose titles are not on the list outnumber the items the list has room for under its cap, the whole restore SHALL be cancelled with `The list has room for <count>, but the restore needs <number>. Nothing was restored.`, where `<count>` is the room as `1 item` or `<n> items`. In each of these cases nothing SHALL change and nothing SHALL be sent as a prompt.
 
 #### Scenario: Restore Puts an Item Back
 
@@ -84,7 +84,7 @@ The per-turn update, the periodic review, and `/todos refresh` SHALL be told whi
 #### Scenario: Restore Marks a Title Already on the List
 
 - **WHEN** trash entries 1 and 2 are picked and entry 2's title is already on the list
-- **THEN** only entry 1's item is added, both entries leave the trash, and the reply is `Restored 1 item:` followed by entry 1's line and entry 2's line ending ` (already on the list)`
+- **THEN** only entry 1's item is added, both entries leave the trash, and the reply is `Restored 1 item:` followed by entry 1's line and entry 2's line ending `(already on the list)`
 
 #### Scenario: A Number past the Trash Cancels the Restore
 
